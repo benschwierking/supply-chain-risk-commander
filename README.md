@@ -41,6 +41,15 @@ Use Tutorial under More Information for guidance beside the working controls. Ne
 
 The sidebar accepts a GitHub token, Tavily API key, and optional Tavily project ID. You can instead set `GITHUB_TOKEN`, `TAVILY_API_KEY`, and `TAVILY_PROJECT_ID` in the environment before starting the app. Do not commit secrets into source files.
 
+To create an optional GitHub token:
+
+1. Open [GitHub's fine-grained token creation page](https://github.com/settings/personal-access-tokens/new), or go to your profile picture → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.
+2. Give the token a name, such as HEPHAESTUS, and choose an expiration.
+3. For public repository observations, choose **Public repositories (read-only)**. No write permissions are needed. Reading branch protection settings may also require access to the selected repository and **Administration: read**; a token cannot grant access your account does not have.
+4. Click **Generate token**, then copy the value into the app's **GitHub token (optional)** field. Use the generated token, not your GitHub password.
+
+Public requests can work without a token; adding one can increase API limits. See [GitHub's token guide](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) and [branch protection permissions](https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection) for details.
+
 Credentials stay in session or the process environment and are excluded from exports. Clicking Run research sends public contributor names/handles and repository identifiers to Tavily. It does not send your full SBOM or mission inputs. GitHub requests use mapped repository identifiers and public contributor accounts. No requests are made merely because a file was uploaded.
 
 Assessments and research results stay in session memory, not a database. Export before ending the session. Changing the inventory or evidence mode starts a new assessment context. No Tavily key is needed for GitHub collection or offline use. Without network access, live observations remain unknown; the offline sample remains usable after dependencies are installed.

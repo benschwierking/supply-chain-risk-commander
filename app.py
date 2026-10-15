@@ -34,7 +34,14 @@ with st.sidebar:
     mode=st.radio('Evidence mode',['Offline scenario','Live GitHub'], help='Offline evidence is synthetic. Uploaded SBOMs never inherit demo findings.')
     upload=st.file_uploader('Import an SBOM',type=['json','jsonld'], help='CycloneDX, SPDX 2.x JSON, or SPDX 3 JSON-LD, up to 10 MB. Repository links come from the file and require verification.')
     sample=st.selectbox('Sample inventory',['CycloneDX','SPDX','SPDX 3'], help='Bundled example inventories. Offline scenario values are synthetic, not findings about the listed projects.')
-    token=st.text_input('GitHub token (optional)',type='password',value=os.getenv('GITHUB_TOKEN',''), help='Token stays in this session and is never exported. Public requests can work without one. A token may increase rate limits; branch protection evidence may require additional permissions.')
+    token=st.text_input('GitHub token (optional)',type='password',value=os.getenv('GITHUB_TOKEN',''), help=(
+        'GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token. '
+        '[Create a token](https://github.com/settings/personal-access-tokens/new).\n\n'
+        'Give it a name and expiration. For public repository observations, choose Public repositories (read-only); no write permissions are needed. '
+        'Reading branch protection settings may additionally require selected-repository access and Administration: read, subject to your existing access.\n\n'
+        'Copy the generated token into this field (not your GitHub password). It stays in this session and is never exported. '
+        'A token can increase API limits; public requests can also work without one.'
+    ))
     use_scorecard=st.checkbox('Include OpenSSF Scorecard',False, help='Fetch optional repository security-check context. Scorecard results are shown separately and do not affect this model.')
     tavily_key=st.text_input('Tavily API key (optional)',type='password',value=os.getenv('TAVILY_API_KEY',''), help='Enables contributor web-source research. The key stays in session and is never exported. Queries send public GitHub names, handles, and repository identifiers to Tavily only when you run research.')
     project_id=st.text_input('Tavily project ID (optional)',value=os.getenv('TAVILY_PROJECT_ID',''),help='Optional usage attribution for Tavily requests. Not included in exported reports.')

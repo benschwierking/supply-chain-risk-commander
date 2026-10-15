@@ -69,14 +69,14 @@ def score(evidence, impact, selected=()):
                 residual=round(after,1) if after is not None else None, completeness=denominator, drivers=drivers,
                 selected_controls=list(selected), impact_inputs=list(impact))
 
-def sidecar(components, evidence, results, source):
-    return dict(schema='scrc-risk-sidecar/1.0', generated_at=datetime.now(timezone.utc).isoformat(), source=source,
+def sidecar(components, evidence, results, source, research=None):
+    return dict(schema='hephaestus-risk-sidecar/1.1', application='HEPHAESTUS', contributor_research=research or {}, component_repository_map={c['id']:c.get('repo') for c in components}, generated_at=datetime.now(timezone.utc).isoformat(), source=source,
                 model='weighted-observed-exposure-v1', baseline=BASELINE,
                 limitations=['Ordinal decision support, not probability or maliciousness detection.', 'Unknown factors excluded; low completeness can hide exposure.', 'Repository-level present-day evidence is not release-specific.', 'Contributor identities and U.S. Person status unverified; authorized attestation required.', 'Mitigation effects are analyst assumptions, not verified implementation.'],
                 components=[dict(**c, evidence=evidence.get(c['id'],{}), assessment=results[c['id']]) for c in components])
 
 def report(payload):
-    lines=['# Supply Chain Risk Commander', f"Generated: {payload['generated_at']}", f"Evidence mode: {payload['source']}", '', '| Component | Impact | Exposure | Modeled residual | Completeness |', '|---|---:|---:|---:|---:|']
+    lines=['# HEPHAESTUS', f"Generated: {payload['generated_at']}", f"Evidence mode: {payload['source']}", '', '| Component | Impact | Exposure | Modeled residual | Completeness |', '|---|---:|---:|---:|---:|']
     for c in payload['components']:
         s=c['assessment']; name=c['name'].replace('|','\\|').replace('\n',' ')
         lines.append(f"| {name} {c['version']} | {s['impact']} | {s['exposure']} | {s['residual']} | {s['completeness']}% |")

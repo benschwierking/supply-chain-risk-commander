@@ -1,26 +1,19 @@
-# Supply Chain Risk Commander
+# HEPHAESTUS
 
-A component exposure assessment tool. Import an SPDX 2.x or CycloneDX JSON SBOM, inspect GitHub contributor and governance observations, model controls, and export an auditable risk sidecar. Runs without tokens, network, or an LLM in the clearly labeled synthetic scenario.
+HEPHAESTUS helps you review the open-source components in a software bill of materials (SBOM), examine public repository and contributor sources, and compare proposed safeguards against the consequences of a component failing in your operation.
+
+It supports SPDX 2.x and CycloneDX JSON inventories. It runs locally and includes a fictional offline scenario for learning. It does not detect malicious contributors or calculate a probability of compromise.
 
 ## Quick start
 
-Python 3.11–3.13 recommended. Run these commands from the project directory.
-
-### Ubuntu / Debian
-
-Install virtual-environment support through the operating system, then install the app inside its own environment:
+Use Python 3.11–3.13. Open a terminal in the downloaded project folder. On Ubuntu/Debian, first install virtual-environment support:
 
 ```sh
 sudo apt update
 sudo apt install python3-venv
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m streamlit run app.py
 ```
 
-### macOS / other Linux distributions
-
-With Python and its `venv` module installed:
+On macOS, install Python with its `venv` module if needed. Then, on either system:
 
 ```sh
 python3 -m venv .venv
@@ -28,55 +21,86 @@ python3 -m venv .venv
 .venv/bin/python -m streamlit run app.py
 ```
 
-These commands use the virtual environment explicitly; shell activation is optional. On subsequent launches, run `.venv/bin/python -m streamlit run app.py` from this directory.
+Open http://localhost:8501 on the computer running the app. To stop it, press Ctrl+C in that terminal. To start it again, run the last command from the same folder.
 
-### Troubleshooting: externally managed environment
+If pip reports **externally managed environment**, use the `.venv/bin/python -m pip` command above. Avoid `sudo pip` and `--break-system-packages`. If `ensurepip` is missing, install `python3-venv` or the matching version package, such as `python3.12-venv`. Create a new environment on each device; do not copy `.venv` between computers.
 
-This error means pip is targeting a Python installation managed by the operating system. Use the `.venv/bin/python -m pip` command above instead of system `pip`, `pip3`, or `sudo pip`. Do not use `--break-system-packages` for this project. The suggested `apt install python3-xyz` message is generic guidance; the app dependencies belong in the virtual environment, not individual apt packages.
+## Your first assessment
 
-If creating the environment reports that `ensurepip` is unavailable, install `python3-venv` and retry. If using a specific Python version, install its matching venv package (for example `python3.12-venv` for `python3.12`) when available from your distribution. Create a fresh virtual environment on each device; do not copy `.venv` between computers.
+1. **Choose an inventory.** Start with a bundled sample or upload a JSON SBOM. Nested CycloneDX components are included. SPDX 3 graphs are not supported. Files are limited to 10 MB and inventories to 1,000 components.
+2. **Verify mappings.** Open Inventory & repository mapping. Confirm that each package points to its actual upstream GitHub repository. A URL supplied in an SBOM is not independent evidence of that relationship. Unmapped packages remain available but cannot be researched automatically.
+3. **Choose evidence.** Offline scenario uses fictional observations for bundled samples. Uploaded inventories start unknown. Live GitHub collects current public repository observations. The optional GitHub token can increase API allowance and may permit more branch-setting evidence. Public endpoints can work without it.
+4. **Review and run research.** Select up to five repositories and 1–3 contributors each. Run research explicitly. GitHub observations are collected for scoring; if a Tavily key is supplied, two public-source searches run per contributor, at most 30 per run. Fewer contributors may be available. Deep extraction is off. Cached scopes are reused; Retry failed research reruns only partial or failed scopes. Retrying may consume additional searches. Research can take several minutes; progress is shown and requests have timeouts.
+5. **Inspect and set consequences.** Select a component using the selector or matrix. In Live GitHub, Fetch evidence also collects governance observations for just that component. Set operational criticality, deployment reach, and recovery difficulty using their information icons for 1–5 scale definitions.
+6. **Review sources and proposed controls.** Examine Evidence and Method before interpreting the matrix. Controls are what-if assumptions, not upstream changes or implementation evidence.
+7. **Finish assessment.** Review the all-component summary, then download a PDF report and JSON sidecar. Unknown observations do not prevent reporting. The original SBOM is unchanged.
 
-Reference: [Python Packaging User Guide — virtual environments](https://packaging.python.org/en/latest/guides/installing-using-pip-and-virtual-environments/).
+Use Tutorial under More Information for guidance beside the working controls. Next advances the highlighted box; Exit tutorial asks for confirmation. Tutorial navigation does not run research. README opens this guide; Back to assessment restores the assessment. The Show/Hide sidebar button remains available at the top left.
 
-Open http://localhost:8501. Optional: set `GITHUB_TOKEN` or enter a token in the sidebar. Public endpoints work without credentials within GitHub limits. No database or paid service is required. Data stays in Streamlit session memory; export before ending a session. Install requires internet; the offline demo does not after installation.
+## Connections and privacy
+
+The sidebar accepts a GitHub token, Tavily API key, and optional Tavily project ID. You can instead set `GITHUB_TOKEN`, `TAVILY_API_KEY`, and `TAVILY_PROJECT_ID` in the environment before starting the app. Do not commit secrets into source files.
+
+Credentials stay in session or the process environment and are excluded from exports. Clicking Run research sends public contributor names/handles and repository identifiers to Tavily. It does not send your full SBOM or mission inputs. GitHub requests use mapped repository identifiers and public contributor accounts. No requests are made merely because a file was uploaded.
+
+Assessments and research results stay in session memory, not a database. Export before ending the session. Changing the inventory or evidence mode starts a new assessment context. No Tavily key is needed for GitHub collection or offline use. Without network access, live observations remain unknown; the offline sample remains usable after dependencies are installed.
+
+## How the assessment works
+
+These are explainable decision-support indices, not validated predictions. The model weights and control discounts are design assumptions, not a scientific estimate of attack likelihood.
+
+### Sources used
+
+- **SBOM input:** component name, version, identifiers, and repository references. Package-to-repository mappings are unverified. Dependency reachability is not resolved; deployment reach is your input.
+- **GitHub REST:** repository archive state, default branch context, available review settings, and the first page of up to 100 contributor records. Contributor concentration is the largest recorded commit share in that returned sample. Records may be cached or truncated, include bots, and describe history rather than present maintainer privileges. A protected flag alone does not prove prevention of direct commits; that scored safeguard stays unknown in live collection. Review settings may have bypasses and do not establish every independent-review requirement.
+- **Tavily contributor research:** the approved Contributor Lens modules build two queries from the public GitHub identity and repository, then filter results with heuristic identity matching. Weak matches are discarded; retained sources are labeled heuristic exact or probable and require human confirmation. A search relevance value is not identity certainty. No retained matches is not a negative finding. Failed searches are visibly incomplete. LinkedIn is excluded, deep extraction is disabled, and no generated answer or LLM is required. These results supply context only: they do not change exposure or evidence completeness. Named non-bot research contributors differ from the broader scoring sample.
+- **Optional OpenSSF Scorecard:** a separate repository snapshot for context. Its checks are not included in this model's scores.
+- **OSPS Baseline v2026.08.28:** guidance for proposed safeguards, not a claim of compliance. The app links selected controls to independent human review, primary-branch protection, and documented privileged-member roles.
+
+All live observations describe the repository at retrieval, not necessarily the exact package release in the SBOM. Verify source identity, package mapping, and release provenance before relying on findings.
+
+### Formulas and scales
+
+**Mission impact** = 100 × (operational criticality + deployment reach + recovery difficulty) / 15. Each input ranges 1–5, so impact ranges 20–100. Default 3 values are starting assumptions to review, not mission facts.
+
+**Observed exposure** = 100 × sum(weight × observed factor) / sum(known weights). Factors range 0–1. Weights: contributor concentration 30, archived repository 15, direct-commit safeguard gap 30, and review-setting gap 25. Archived is 1 when archived and 0 otherwise. Safeguard gaps are 1 for an observed gap, 0 for an observed safeguard. Unknown factors are excluded, never treated as zero. With no observations, exposure is Unknown.
+
+**Evidence completeness** = sum of the known factor weights, expressed as a percentage. It measures model coverage, not truth or statistical confidence. A low observed score with missing evidence cannot establish low overall exposure.
+
+**Modeled residual** applies illustrative discounts to selected drivers using the same denominator: independent review 65%, prevention of direct commits 75%, and documented privileged-member responsibilities 20% on the concentration driver. Documenting roles does not change actual commit concentration; its discount is an uncalibrated continuity-planning assumption. Effects do not stack within a driver or increase completeness. Selecting a control does not implement it, verify it, or prove compliance.
+
+In the matrix, circles are baseline and diamonds are modeled residual. Point size reflects completeness. Components with no scored observations are omitted from the chart but remain selectable. The 50-point quadrant dividers are visual guides, not validated acceptance thresholds. Compare components with attention to differences in evidence coverage.
+
+### What the results cannot establish
+
+The app does not infer malicious intent, nationality, citizenship, immigration status, or U.S. Person status. Names, location, language, ethnicity, company, or public-profile absence must not be used as proxies. Status remains unverified until an authorized process validates explicit attestation. Maintain those records in an authorized system outside this public-evidence report.
+
+No vulnerability scan, malware detection, release-provenance verification, or baseline compliance audit is claimed. Before accepting a component, verify missing evidence and obtain mission-owner review. Record an owner and expiry for any exception. Reassess after material release, governance, or operational changes.
+
+## Downloading the assessment
+
+Finish assessment opens the report view even when evidence is incomplete. The **PDF report** includes every component, mission inputs, drivers, source links, research status, limitations, and proposed controls. The **JSON sidecar** preserves structured evidence, source timestamps and queries, component/repository associations, the SBOM SHA-256, model version, and pinned research revision. Credentials are excluded. Clearly labeled synthetic values are not findings about the linked projects.
+
+## Updating an installed copy
+
+Stop the app with Ctrl+C. If you cloned the GitHub repository, run these commands from the checkout:
 
 ```sh
-python -m pytest -q
+git pull --ff-only
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m streamlit run app.py
 ```
 
-## Two-minute demonstration
+If Git reports local changes or diverged history, stop and preserve your changes with a commit or a backup before resolving the conflict. Do not use a hard reset or delete changes to force the update. Export any session assessment before restarting.
 
-- **0:00–0:20** Start in Offline scenario. State plainly: all observations are synthetic; project links are inventory mappings, not supporting findings. Show six components and the mission/exposure matrix.
-- **0:20–0:45** Select Requests, raise mission criticality and reach. Explain horizontal impact versus vertical observed contributor/governance exposure. Completeness measures coverage, not certainty.
-- **0:45–1:10** Select independent human review and primary-branch safeguards. Show the diamond moving down while impact stays fixed. These are modeled assumptions; no repository was changed.
-- **1:10–1:30** Open the Evidence tab and Method tab. Show weighted drivers, unknown handling, policy sources, and the unverified identity/attestation guardrail.
-- **1:30–1:50** Optionally switch to Live GitHub, fetch one component, and show timestamped API URLs. If the network fails, unknown stays unknown. Do not depend on live access for judging.
-- **1:50–2:00** Export JSON and the concise report. Point to the enterprise adoption policy below.
+If you installed from a ZIP, download the latest source into a **new folder**, create a fresh `.venv`, install requirements, and start the app from that new folder. Keep the previous folder until the update works. Do not overwrite a running installation or copy its `.venv`. Re-enter session credentials or keep using your environment variables.
 
-## Evidence and model
+## References and validation
 
-Mission impact = 100 × sum of three analyst inputs / 15. Inputs each range 1–5. Defaults are illustrative, not mission facts. Exposure = 100 × weighted sum of known factors / known weights. Weights: concentration 30; archived 15; direct-commit safeguard gap 30; review gap 25. Missing factors are excluded and visibly reduce completeness. All-unknown components are unscored and omitted from the chart, available via the selector.
+- [GitHub REST repository API](https://docs.github.com/en/rest/repos/repos)
+- [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)
+- [Contributor research source](https://github.com/rockangator/tavily-contributor-research-demo) at revision `3b0b945370f6cf9be8aab0d6982c692d15d2e53b`; attribution and approved reuse are documented in THIRD_PARTY.md.
+- [OpenSSF OSPS Baseline v2026.08.28](https://baseline.openssf.org/versions/2026-08-28)
+- [Python virtual-environment guidance](https://packaging.python.org/en/latest/guides/installing-using-pip-and-virtual-environments/)
 
-GitHub evidence is repository-level and current at retrieval, not release-specific. Contributor concentration uses the largest commit count divided by counts in the first 100 contributor records, includes bots, and may be truncated/cached. It is not privilege concentration, identity verification, or maliciousness. An archive flag measures lifecycle context, not a vulnerability. A protected branch flag alone does not establish direct-commit prevention, so live branch exposure stays unknown. Review settings are partial evidence and may be bypassed. Mapping a package to a repository is unverified SBOM input. No vulnerability scanning, malware detection, or provenance verification is claimed.
-
-Residual exposure applies illustrative factor discounts: review 65%; direct-commit prevention 75%; documented privileged-member responsibilities 20% to the concentration driver. The last is a continuity-planning assumption and does not change actual commit concentration. These are not calibrated estimates or compliance results. Effects do not stack within a factor or increase completeness. Quadrants use a visual 50-point divider with no validated acceptance threshold. Compare components with different coverage cautiously.
-
-Optional Scorecard data is contextual only and excluded from scoring; unknown or failed checks do not imply a finding. deps.dev and LLM integration are intentionally omitted to keep the demo reliable.
-
-## Enterprise adoption policy (proposed, requires organization approval)
-
-1. Assign each component a mission owner. Validate package-to-repository mapping against publisher records and release provenance. Preserve the original SBOM hash with each assessment.
-2. Record retrieval time and source endpoints. Review partial, stale, conflicting, or missing observations before a deployment decision. Never auto-approve a component on a low exposure index; the index is not an acceptance threshold.
-3. Request evidence of primary-branch direct-commit prevention (OSPS-AC-03.01), independent non-author human review (OSPS-QA-07.01), and privileged-member roles (OSPS-GV-01.01/02). A selected simulation control is a plan, not proof. Store implementation evidence and an accountable reviewer separately.
-4. Contributor assessment concerns observable activity, review boundaries, and privileges. U.S. Person status remains unverified until an authorized process obtains and validates explicit attestation under applicable organizational policy. Names, language, location, ethnicity and profile proxies must never determine status or malicious intent. Keep attestation records in an authorized system, outside this public-evidence sidecar.
-5. Require mission-owner disposition for high-impact components with missing evidence: verify safeguards, isolate usage, plan replacement, or document a time-bounded exception and owner. Reassess after material contributor, governance, release or mission changes.
-6. Extend collection with verified Sigstore attestations, SLSA provenance and GUAC relationships when production adoption justifies it. They are integration opportunities, not implemented capabilities.
-
-## Sources and compatibility
-
-- [OSPS Baseline v2026.08.28](https://baseline.openssf.org/versions/2026-08-28): selected guidance; this app is not a baseline compliance scanner.
-- [GitHub repository/contributors REST API](https://docs.github.com/en/rest/repos/repos): pinned supported API version 2022-11-28; GET requests only, 10-second timeout each; protection may require additional privileges. API status codes preserved, tokens omitted. No requests to SBOM-supplied hosts.
-- [Streamlit Plotly selection](https://docs.streamlit.io/develop/api-reference/charts/st.plotly_chart): scatter selection with `on_select="rerun"`, plus an accessible component selector.
-- [OpenSSF Scorecard API](https://api.securityscorecards.dev): optional snapshot with its own date and coverage.
-
-Pinned runtime dependencies in requirements.txt. Tests cover both parsers, nested/duplicate inventory, invalid input, mapping boundaries, deterministic scoring, unknown handling, mitigations, JSON/report export, and mocked GitHub failures/partial responses. The app supports SPDX 2.x package inventories, not SPDX 3 graphs. It normalizes CycloneDX nested components; it does not validate the entire SBOM schema or resolve dependency reachability. Mission reach is an analyst input. Inventory limit: 1,000 components; JSON upload limit: 10 MB. Local trusted use is the MVP deployment model.
+Run automated checks with `.venv/bin/python -m pytest -q`. Tests use local fixtures/fakes and do not consume Tavily credits. Pinned dependencies are in requirements.txt. Local trusted use is the supported deployment model.

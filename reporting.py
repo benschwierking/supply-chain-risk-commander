@@ -56,6 +56,25 @@ def pdf_report(payload):
             story.append(p(f'{title} ({control}): assumed {reduction:.0%} reduction of {factor}. Not verified implementation.'))
         if not s['selected_controls']: story.append(p('None selected.'))
         story.append(link(payload['baseline'],'OSPS Baseline v2026.08.28'))
+        draft=payload.get('generated_control_measures',{}).get(c['id'])
+        if draft:
+            story.append(p('Generated control measures - unverified proposals','Heading2'))
+            status='OUT OF DATE - assessment changed' if draft.get('stale') else 'Reviewed by user; implementation unverified' if draft.get('reviewed') else 'Draft - not reviewed'
+            story.append(p(f"{draft.get('provider')} | Model: {draft.get('model')} | Generated: {draft.get('generated_at')}",'SmallBody'))
+            story.append(p('Status: '+status))
+            story.append(p('These proposals do not change the deterministic scores or evidence coverage. Review source accuracy, applicability and authority before implementation.'))
+            if draft.get('operational_context'): story.append(p('Operational context: '+draft['operational_context'],'SmallBody'))
+            if draft.get('text'):
+                story.append(p('Unstructured model draft - review the text directly. No priorities or verification fields have been inferred.','SmallBody'))
+                for paragraph in draft['text'].split('\n\n'): story.append(p(paragraph,'SmallBody'))
+            for measure in draft.get('controls',[]):
+                story.append(CondPageBreak(100))
+                story.append(p(str(measure['id'])+'. '+measure['title'],'Heading3'))
+                story.append(p('Proposed implementation priority: '+measure['priority'],'SmallBody'))
+                story.append(p(measure['rationale']))
+                for index,action in enumerate(measure['actions'],1): story.append(p(f'{index}. {action}'))
+                story.append(p('Verify completion: '+measure['verification']))
+                for source in measure.get('source_urls',[]): story.append(link(source))
         for note in e.get('notes',[]): story.append(p(note,'SmallBody'))
         for source in e.get('sources',[]): story.append(link(source['url'],source['url']+' (HTTP '+str(source['http_status'])+')'))
         for person in e.get('contributors',[]):

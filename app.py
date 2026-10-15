@@ -10,6 +10,8 @@ from evidence import collect, collect_inventory, collection_status, unknown_evid
 from research import run_batch
 from reporting import pdf_report
 from tutorial import coach, start as start_tutorial, active as tutorial_active
+from connections import check_credential, connection_key
+from local_llm import PROVIDERS, local_base_url, list_models, preferred_model, control_context, context_fingerprint, generate_controls
 
 st.set_page_config(page_title='HEPHAESTUS', page_icon='assets/favicon.svg', layout='wide', initial_sidebar_state='expanded')
 network_image=base64.b64encode(Path('assets/network.png').read_bytes()).decode()
@@ -25,6 +27,22 @@ def request_assessment_retry(repositories):
     request_assessment_collection(repositories)
     st.session_state.retry_assessment_requested=True
 def display_score(value): return 'Unknown' if value is None else f'{value:.1f}'
+def credential_feedback(service, secret, project=''):
+    label='GitHub token' if service=='github' else 'Tavily API key'
+    key=connection_key(service,secret,project)
+    previous=st.session_state.get(service+'_credential_check',{})
+    recheck=st.button('Recheck '+label,key='recheck_'+service,disabled=not secret)
+    if secret and (recheck or previous.get('key')!=key):
+        with st.spinner('Checking '+label+'…'):
+            previous={'key':key,**check_credential(service,secret,project)}
+        st.session_state[service+'_credential_check']=previous
+    if not secret:
+        st.session_state.pop(service+'_credential_check',None)
+        st.caption('No token supplied; public GitHub requests can still work.' if service=='github' else 'No key supplied; contributor web research is unavailable.')
+    else:
+        show=st.success if previous.get('state')=='accepted' else st.error if previous.get('state')=='rejected' else st.warning
+        show(previous.get('message','Not checked.'))
+        if previous.get('checked_at'): st.caption('Checked: '+previous['checked_at'])
 
 if 'sidebar_open' not in st.session_state:
     st.session_state.sidebar_open=True
@@ -43,7 +61,9 @@ with st.sidebar:
     upload=st.file_uploader('Import an SBOM',type=['json','jsonld'], help='CycloneDX, SPDX 2.x JSON, or SPDX 3 JSON-LD, up to 10 MB. Repository links come from the file and require verification.')
     upload_status=st.empty()
     sample=st.selectbox('Sample inventory',['CycloneDX','SPDX','SPDX 3'], help='Bundled example inventories. Offline scenario values are synthetic, not findings about the listed projects.')
-    token=st.text_input('GitHub token (optional)',type='password',value=os.getenv('GITHUB_TOKEN',''), help=(
+    st.subheader('Connections')
+    st.caption('Press Enter or leave a credential field to check it. Checks do not start searches. Recheck retries a check without changing the value.')
+    token=st.text_input('GitHub token (optional)',type='password',value=os.getenv('GITHUB_TOKEN',''),key='github_token', help=(
         'GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token. '
         '[Create a token](https://github.com/settings/personal-access-tokens/new).\n\n'
         'Give it a name and expiration. For public repository observations, choose Public repositories (read-only); no write permissions are needed. '
@@ -51,10 +71,50 @@ with st.sidebar:
         'Copy the generated token into this field (not your GitHub password). It stays in this session and is never exported. '
         'A token can increase API limits; public requests can also work without one.'
     ))
+    credential_feedback('github',token)
     use_scorecard=st.checkbox('Include OpenSSF Scorecard',False, help='Fetch optional repository security-check context. Scorecard results are shown separately and do not affect this model.')
-    tavily_key=st.text_input('Tavily API key (optional)',type='password',value=os.getenv('TAVILY_API_KEY',''), help='Enables contributor web-source research. The key stays in session and is never exported. Queries send public GitHub names, handles, and repository identifiers to Tavily only when you run research.')
-    project_id=st.text_input('Tavily project ID (optional)',value=os.getenv('TAVILY_PROJECT_ID',''),help='Optional usage attribution for Tavily requests. Not included in exported reports.')
+    tavily_key=st.text_input('Tavily API key (optional)',type='password',value=os.getenv('TAVILY_API_KEY',''),key='tavily_api_key', help='Checked using the usage endpoint without running searches. Enables contributor web-source research. The key stays in session and is never exported. Queries send public GitHub names, handles, and repository identifiers to Tavily only when you run research.')
+    project_id=st.text_input('Tavily project ID (optional)',value=os.getenv('TAVILY_PROJECT_ID',''),key='tavily_project_id',help='Optional usage attribution for Tavily requests. Changing it rechecks the key and project combination. Not included in exported reports.')
+    credential_feedback('tavily',tavily_key,project_id)
     coach('connections')
+    with st.expander('Local LLM connection'):
+        provider_default=os.getenv('LOCAL_LLM_PROVIDER','Ollama')
+        llm_provider=st.selectbox('Local API type',PROVIDERS,index=PROVIDERS.index(provider_default) if provider_default in PROVIDERS else 0,key='local_llm_provider',help='Ollama uses its native chat API. OpenAI-compatible uses /v1/chat/completions. OpenAI-compatible text uses /v1/completions for servers or models with a text-completion API. Model names are unrestricted.')
+        default_endpoint='http://127.0.0.1:11434' if llm_provider=='Ollama' else 'http://127.0.0.1:1234/v1'
+        llm_endpoint=st.text_input('Local server URL',value=os.getenv('LOCAL_LLM_URL',default_endpoint),key='local_llm_url_'+llm_provider,help='Ollama normally uses http://127.0.0.1:11434. LM Studio normally uses http://127.0.0.1:1234/v1. The server must run on the same machine as HEPHAESTUS; only loopback URLs are accepted.')
+        llm_key=st.text_input('Local model API key (optional)',type='password',value=os.getenv('LOCAL_LLM_API_KEY',''),key='local_llm_api_key',help='Only for a local server that requires authentication. Sent only to the configured loopback endpoint. Never included in the prompt or report.')
+        manual_model=st.text_input('Model ID override (optional)',value=os.getenv('LOCAL_LLM_MODEL',''),key='local_model_override',help='Enter any model identifier your server accepts. Overrides the model list and permits generation when a server does not implement model discovery. There is no required model family or size.')
+        llm_structured=st.checkbox('Request structured JSON',value=True,key='local_llm_structured',help='Ollama can enforce JSON output. Turn this off for models that do not support it. Other APIs receive a formatting instruction only. Non-structured responses are retained as plain-text drafts.')
+        llm_timeout=st.number_input('Generation timeout (seconds)',min_value=30,max_value=300,value=120,step=30,help='Large models may need more time to load and respond. Connection checks have a separate short timeout.')
+        llm_config=connection_key(llm_provider,llm_endpoint,llm_key)
+        if st.button('Connect local model',key='connect_local_llm'):
+            with st.spinner('Checking local server and listing models…'):
+                try:
+                    models=list_models(llm_provider,llm_endpoint,llm_key)
+                    st.session_state.local_llm_connection={'key':llm_config,'models':models,'state':'connected'}
+                except ValueError as exc:
+                    st.session_state.local_llm_connection={'key':llm_config,'models':[],'state':'failed','message':str(exc)}
+        llm_connection=st.session_state.get('local_llm_connection',{})
+        llm_ready=llm_connection.get('key')==llm_config and llm_connection.get('state')=='connected'
+        llm_models=llm_connection.get('models',[]) if llm_ready else []
+        llm_model=''
+        if llm_ready:
+            st.success('Local server accepted the connection'+(' and API key.' if llm_key else '.'))
+            if llm_models:
+                preferred=preferred_model(llm_models,os.getenv('LOCAL_LLM_MODEL',''))
+                llm_model=st.selectbox('Local model',llm_models,index=llm_models.index(preferred),key='local_model_'+llm_config,help='Use the identifier returned by your server, such as gpt-oss:20b. Connecting lists models; it does not generate controls.')
+            else: st.warning('Server connected, but no models are available. Install or load a model in your local runner, then reconnect.')
+        elif llm_connection.get('key')==llm_config and llm_connection.get('state')=='failed': st.error(llm_connection['message'])
+        else: st.caption('Not connected. Start Ollama or LM Studio, then connect to list available models.')
+        if manual_model.strip():
+            llm_model=manual_model.strip()
+            st.caption('Manual model ID selected. Generation will verify this model endpoint even if model discovery is unavailable.')
+        try:
+            local_base_url(llm_endpoint,llm_provider)
+            llm_can_generate=bool(llm_model)
+        except ValueError:
+            llm_can_generate=False
+        st.caption('Only Generate control measures sends assessment context to this server. Use a locally downloaded model; runner cloud or forwarding features can route requests elsewhere.')
     st.divider()
     st.subheader('More Information')
     st.button('README',key='readme_nav',on_click=go_readme,width='stretch')
@@ -88,6 +148,8 @@ if st.session_state.get('context') != context:
         st.session_state.assessments={}
         st.session_state.research_cache={}
         st.session_state.repository_overrides={}
+        st.session_state.control_drafts={}
+        st.session_state.control_contexts={}
         st.session_state.evidence={c['id']:synthetic(i) if mode=='Offline scenario' and not upload else unknown_evidence() for i,c in enumerate(components)}
 evidence=st.session_state.evidence
 for component in components:
@@ -101,6 +163,13 @@ def build_payload():
         results[item['id']]=score(evidence[item['id']],saved['inputs'],saved['controls'])
     payload=sidecar(components,evidence,results,mode+' / '+('uploaded SBOM' if upload else 'bundled sample inventory'),st.session_state.get('research_cache',{}))
     payload['sbom_sha256']=hashlib.sha256(raw).hexdigest()
+    payload['schema']='hephaestus-risk-sidecar/1.2'
+    payload['generated_control_measures']={}
+    for item in components:
+        draft=st.session_state.get('control_drafts',{}).get(item['id'])
+        if draft:
+            current=control_context(item,evidence[item['id']],results[item['id']],st.session_state.get('control_contexts',{}).get(item['id'],''))
+            payload['generated_control_measures'][item['id']]={**draft,'stale':draft['context_fingerprint']!=context_fingerprint(current)}
     return payload
 @st.cache_data(show_spinner=False,max_entries=8)
 def report_bytes(serialized): return pdf_report(json.loads(serialized))
@@ -109,6 +178,7 @@ if st.session_state.view=='report':
     st.subheader('Assessment report',help='All components are included, including those with missing observations. Proposed controls remain modeled assumptions.')
     st.dataframe([{'Component':c['name'],'Impact':c['assessment']['impact'],'Exposure':display_score(c['assessment']['exposure']),'Residual':display_score(c['assessment']['residual']),'Coverage %':c['assessment']['completeness'],'Evidence status':collection_status(c['evidence'],c.get('repo'))} for c in payload['components']],hide_index=True,width='stretch')
     st.caption('Impact is calculated from your mission inputs. The starting values of 3/5 each give 60; review them for each component. Unknown exposure means observations are missing, not that exposure is zero.')
+    if payload['generated_control_measures']: st.caption('Generated control measures are included in the downloads with model provenance and review status. Out-of-date drafts remain clearly labeled and do not affect scoring.')
     for limitation in payload['limitations']: st.caption(limitation)
     serialized=json.dumps(payload,indent=2)
     st.download_button('Download PDF report',report_bytes(serialized),file_name='hephaestus-assessment.pdf',mime='application/pdf')
@@ -262,6 +332,41 @@ if s['exposure'] is None:
     if not c['repo']: st.info('This component needs a verified GitHub repository mapping. Add one in Inventory & repository mapping, then collect assessment evidence.')
     elif evidence[selected].get('mode')=='unknown': st.info('No assessment evidence collected for this component yet. Include its repository in Repositories for assessment and click Collect assessment evidence.')
     else: st.error('Collection returned no scored observations for this component. Review the errors in Evidence and use Retry missing evidence after correcting the cause.')
+st.subheader('Control measures',help='Use your local LLM to draft actions and verification steps for the selected component. Generated text is unverified and has no automatic effect on scores or evidence coverage.')
+coach('local_controls')
+st.caption('Generate proposals with your chosen local model. Review each measure before use. To simulate score reductions, use Model mitigation controls above; generated proposals do not change scores.')
+operational_context=st.text_area('Operational context for controls (optional)',value=st.session_state.get('control_contexts',{}).get(selected,''),max_chars=2000,key='control_context_'+context+selected,help='Describe constraints, deployment, ownership, or recovery options that should shape the proposals. Only this selected component\'s assessment and this text are sent to the local endpoint; credentials and the full SBOM are excluded.')
+st.session_state.setdefault('control_contexts',{})[selected]=operational_context
+draft_context=control_context(c,evidence[selected],s,operational_context)
+with st.expander('Context sent to the local model'):
+    st.json(draft_context)
+if not llm_can_generate: st.caption('Open Local LLM connection in the sidebar. Connect and select a model, or supply a model ID manually, to enable generation.')
+if st.button('Generate control measures',key='generate_controls',disabled=not llm_can_generate,type='primary'):
+    with st.spinner(f'Generating controls with {llm_model}; this can take up to {llm_timeout} seconds…'):
+        try:
+            draft=generate_controls(llm_provider,llm_endpoint,llm_model,draft_context,llm_key,int(llm_timeout),secrets=(token,tavily_key,project_id),structured=llm_structured)
+            st.session_state.setdefault('control_drafts',{})[selected]=draft
+        except ValueError as exc: st.error(str(exc))
+draft=st.session_state.get('control_drafts',{}).get(selected)
+if draft:
+    stale=draft['context_fingerprint']!=context_fingerprint(draft_context)
+    if stale: st.warning('The assessment or operational context changed after generation. These measures are out of date; regenerate them before relying on them.')
+    st.caption(f"Unverified model draft · {draft['provider']} · {draft['model']} · {draft['generated_at']}")
+    if draft.get('text'):
+        st.info('This model returned an unstructured draft. Review its text directly; no control fields or score reductions have been inferred from it.')
+        st.text(draft['text'])
+    for measure in draft['controls']:
+        with st.container(border=True):
+            st.text(f"{measure['id']}. {measure['title']}")
+            st.caption('Proposed implementation priority: '+measure['priority'])
+            st.text(measure['rationale'])
+            for step in measure['actions']: st.text('• '+step)
+            st.text('Verify completion: '+measure['verification'])
+            for source in measure['source_urls']: st.link_button('Supplied assessment source',source)
+    review_key='controls_reviewed_'+context+selected+draft['generated_at']
+    reviewed=st.checkbox('I have reviewed these proposed control measures',value=draft.get('reviewed',False),key=review_key,disabled=stale,help='Records your review in exports. It does not prove implementation or effectiveness, and does not change scoring.')
+    draft['reviewed']=reviewed and not stale
+    st.caption('Included in PDF and JSON reports with model provenance, review status, and an out-of-date flag when applicable.')
 coach('evidence')
 t1,t2,t3=st.tabs(['Evidence','Method','Export'])
 with t1:

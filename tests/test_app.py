@@ -156,6 +156,8 @@ def test_failed_token_can_be_retried_after_replacement(monkeypatch):
         def json(self): return self.data
     calls=[]
     def get(url, **kwargs):
+        if url=='https://api.github.com/user':
+            return Response(200,{'login':'example'}) if kwargs['headers'].get('Authorization')=='Bearer replacement-token' else Response(401,{})
         calls.append(url)
         if kwargs['headers'].get('Authorization')!='Bearer replacement-token': return Response(401,{})
         if '/contributors?' in url: return Response(200,[{'login':'a','contributions':7},{'login':'b','contributions':3}])
@@ -187,3 +189,111 @@ def test_sample_collection_preserves_requested_scope_across_mode_change(monkeypa
     assert not app.exception and calls==['psf/requests']
     assert next(m for m in app.multiselect if m.label=='Repositories for assessment').value==['psf/requests']
     assert not any('Session State API' in item.value for item in app.warning)
+
+def test_immediate_credential_feedback_cache_change_and_recheck(monkeypatch):
+    calls=[]
+    exported=[]
+    monkeypatch.setattr('reporting.pdf_report',lambda payload:exported.append(payload) or b'%PDF-1.4 test')
+    class Response:
+        def __init__(self,status,data): self.status_code,self.data=status,data
+        def json(self): return self.data
+    def get(url,**kwargs):
+        calls.append((url,kwargs))
+        token=kwargs['headers']['Authorization']
+        if token=='Bearer bad-key': return Response(401,{})
+        return Response(200,{'login':'example'} if url.endswith('/user') else {'key':{'usage':0}})
+    monkeypatch.setattr('connections.requests.get',get)
+    monkeypatch.setattr('requests.post',lambda *a,**k:(_ for _ in ()).throw(AssertionError('No search expected')))
+    app=load()
+    app.text_input(key='github_token').set_value('bad-key').run()
+    assert not app.exception and any('GitHub token not accepted' in item.value for item in app.error)
+    app.text_input(key='github_token').set_value('good-key').run()
+    assert any('GitHub token accepted' in item.value for item in app.success)
+    app.slider[0].set_value(4).run()
+    assert len(calls)==2
+    app.button(key='recheck_github').click().run()
+    assert len(calls)==3
+    app.text_input(key='tavily_api_key').set_value('tavily-secret').run()
+    assert any('Tavily API key accepted' in item.value for item in app.success)
+    app.text_input(key='tavily_project_id').set_value('project-secret').run()
+    assert calls[-1][1]['headers']['X-Project-ID']=='project-secret'
+    assert len(calls)==5 and all(url.endswith(('/user','/usage')) for url,_ in calls)
+    app.text_input(key='github_token').set_value('').run()
+    assert not any('GitHub token accepted' in item.value for item in app.success)
+    app.button(key='finish_assessment').click().run()
+    assert not app.exception
+    assert all(secret not in json.dumps(exported[-1]) for secret in ['bad-key','good-key','tavily-secret','project-secret'])
+
+def test_local_control_generation_review_staleness_and_report(monkeypatch):
+    from tests.test_local_llm import proposals
+    calls=[]
+    def request(method,url,key='',body=None,timeout=8):
+        calls.append((method,body))
+        if method=='GET': return {'models':[{'name':'arbitrary-llm:7b'},{'name':'gpt-oss:20b'}]}
+        return {'message':{'content':json.dumps(proposals())}}
+    monkeypatch.setattr('local_llm._request',request)
+    captured=[]
+    monkeypatch.setattr('reporting.pdf_report',lambda payload:captured.append(payload) or b'%PDF-1.4 test')
+    app=load()
+    assert app.button(key='generate_controls').disabled and calls==[]
+    app.button(key='connect_local_llm').click().run()
+    assert not app.exception and not app.button(key='generate_controls').disabled
+    assert next(box for box in app.selectbox if box.label=='Local model').value=='arbitrary-llm:7b'
+    next(box for box in app.selectbox if box.label=='Local model').set_value('gpt-oss:20b').run()
+    app.text_area[0].set_value('Recover within one business day.').run()
+    before=[metric.value for metric in app.metric]
+    app.button(key='generate_controls').click().run()
+    assert not app.exception and [metric.value for metric in app.metric]==before
+    assert len(calls)==2 and calls[1][0]=='POST'
+    assert app.session_state.control_drafts['requests']['model']=='gpt-oss:20b'
+    review=next(box for box in app.checkbox if box.label=='I have reviewed these proposed control measures')
+    review.check().run()
+    assert app.session_state.control_drafts['requests']['reviewed']
+    app.button(key='readme_nav').click().run()
+    app.button(key='back_assessment').click().run()
+    assert app.text_area[0].value=='Recover within one business day.' and len(calls)==2
+    app.slider[0].set_value(5).run()
+    assert any('out of date' in warning.value for warning in app.warning)
+    assert next(box for box in app.checkbox if box.label=='I have reviewed these proposed control measures').disabled
+    app.button(key='finish_assessment').click().run()
+    assert not app.exception and captured[-1]['schema'].endswith('/1.2')
+    draft=captured[-1]['generated_control_measures']['requests']
+    assert draft['stale'] and not draft['reviewed'] and len(draft['controls'])==1
+    assert captured[-1]['components'][0]['assessment']['exposure']==81.4
+
+def test_local_model_failure_preserves_existing_draft(monkeypatch):
+    from tests.test_local_llm import proposals
+    count=[]
+    def request(method,*args,**kwargs):
+        if method=='GET': return {'models':[{'name':'gpt-oss:20b'}]}
+        count.append(1)
+        if len(count)>1: raise ValueError('Local model unavailable or timed out.')
+        return {'message':{'content':json.dumps(proposals())}}
+    monkeypatch.setattr('local_llm._request',request)
+    app=load()
+    app.button(key='connect_local_llm').click().run()
+    app.button(key='generate_controls').click().run()
+    draft=dict(app.session_state.control_drafts['requests'])
+    app.button(key='generate_controls').click().run()
+    assert not app.exception and any('timed out' in error.value for error in app.error)
+    assert app.session_state.control_drafts['requests']==draft
+
+def test_manual_model_id_works_without_model_discovery(monkeypatch):
+    calls=[]
+    def request(method,url,key='',body=None,timeout=8):
+        calls.append((method,url,body))
+        if method=='GET': raise ValueError('Model discovery unavailable (HTTP 404).')
+        return {'choices':[{'text':'Use a supported release and test the rollback procedure.'}]}
+    monkeypatch.setattr('local_llm._request',request)
+    app=load()
+    app.selectbox(key='local_llm_provider').set_value('OpenAI-compatible text').run()
+    app.text_input(key='local_model_override').set_value('custom-model-identifier').run()
+    assert not app.button(key='generate_controls').disabled
+    app.button(key='connect_local_llm').click().run()
+    assert any('discovery unavailable' in error.value for error in app.error)
+    app.button(key='generate_controls').click().run()
+    assert not app.exception
+    assert calls[-1][1].endswith('/v1/completions')
+    assert calls[-1][2]['model']=='custom-model-identifier'
+    draft=app.session_state.control_drafts['requests']
+    assert draft['format']=='text' and 'rollback' in draft['text']

@@ -47,6 +47,8 @@ For invalid JSON, the error identifies the line and column. Download the raw fil
 
 The sidebar accepts a GitHub token, Tavily API key, and optional Tavily project ID. You can instead set `GITHUB_TOKEN`, `TAVILY_API_KEY`, and `TAVILY_PROJECT_ID` in the environment before starting the app. Do not commit secrets into source files.
 
+Press Enter or leave a credential field to check it. An adjacent message says **accepted**, **not accepted**, or **not verified**. Rejected credentials appear in red; connectivity failures, rate limits, and access restrictions remain unverified rather than being called invalid. **Recheck** retries the check. Checks are cached for the current value in this session and show their check time. Editing a key or Tavily project ID invalidates the previous result. These checks use GitHub's [authenticated-user endpoint](https://docs.github.com/en/rest/users/users#get-the-authenticated-user) and Tavily's [usage endpoint](https://docs.tavily.com/documentation/api-reference/endpoint/usage); they never run searches. Acceptance does not prove access to every repository setting or guarantee search credits are available.
+
 To create an optional GitHub token:
 
 1. Open [GitHub's fine-grained token creation page](https://github.com/settings/personal-access-tokens/new), or go to your profile picture → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.
@@ -59,6 +61,33 @@ Public requests can work without a token; adding one can increase API limits. Se
 Credentials stay in session or the process environment and are excluded from exports. Clicking Run research sends public contributor names/handles and repository identifiers to Tavily. It does not send your full SBOM or mission inputs. GitHub requests use mapped repository identifiers and public contributor accounts. No requests are made merely because a file was uploaded.
 
 Assessments and research results stay in session memory, not a database. Export before ending the session. Changing the inventory starts a new assessment context. Uploaded inventory inputs and collected evidence survive evidence-mode changes; switching a bundled sample between synthetic and live modes starts a separate context. No Tavily key is needed for GitHub collection or offline use. Without network access, live observations remain unknown; the offline sample remains usable after dependencies are installed.
+
+## Generate control measures with a local LLM
+
+Use **Local LLM connection** in the sidebar to link your chosen locally running model. There is no required model family, size, vendor SDK, or model-name whitelist. The connection supports Ollama's native API, OpenAI-compatible chat APIs (for example through LM Studio, llama.cpp, vLLM, or LocalAI), and compatible text-completion APIs. Choose the API protocol that your server exposes. Models that do not return structured JSON remain usable through plain-text drafts.
+
+No cloud account is required by HEPHAESTUS. The model server must run on the same machine as the app; only `localhost` and loopback IP URLs are accepted. Redirects and proxy environment variables are disabled for these requests. Use a downloaded local model and disable cloud/forwarding features in your runner if you need all inference to remain on the device.
+
+For a model server on another trusted machine, establish an SSH port forward to that server and point HEPHAESTUS at the forwarded loopback port. In that setup, assessment context travels through the tunnel to the machine you selected; it does not stay on the HEPHAESTUS host.
+
+For **gpt-oss 20b with Ollama**, first install [Ollama](https://ollama.com/download) on that machine. If Ollama is not already running, start it with `ollama serve` in a terminal. In another terminal, download the model once:
+
+```sh
+ollama pull gpt-oss:20b
+```
+
+Then:
+
+1. Choose **Ollama**, keep `http://127.0.0.1:11434`, and click **Connect local model**. The connection result appears immediately. This lists installed models without generating text. Select your model, such as `gpt-oss:20b`. If it is missing, finish installing it and reconnect. The first returned model is selected unless you set `LOCAL_LLM_MODEL`; no model family is preferred. See the [Ollama model page](https://ollama.com/library/gpt-oss:20b) for this optional example.
+2. For **LM Studio** or another compatible runner, load your model and start its server. Choose **OpenAI-compatible** for chat (`/v1/chat/completions`), or **OpenAI-compatible text** for a text-completion API (`/v1/completions`, normally for base models). Enter the base URL, normally `http://127.0.0.1:1234/v1` for LM Studio; other servers may use a different port. If it requires an API key, enter it in **Local model API key**. Connect and choose the returned model ID. **Model ID override** accepts any identifier your server supports, including when discovery is unavailable. With a manual ID, generation tests the model endpoint directly; a failed model-list check does not prevent this attempt.
+3. Select an assessment component. Under **Control measures**, optionally describe operational constraints. Expand **Context sent to the local model** to inspect the selected component, observed factors, mission inputs, score drivers, source URLs, and supplied context.
+4. Click **Generate control measures**. This is the only action that sends assessment context to the model. It excludes other components, the original SBOM file, contributor profiles, and credentials. Large models may take time to load; adjust the bounded 30–300 second timeout if needed.
+5. Review the proposed priorities, rationale, actions, verification steps, and supplied assessment links. If the model cannot produce structured JSON, the app retains an **unstructured draft** without inventing those fields. Turn off **Request structured JSON** if your Ollama model does not support JSON enforcement. Mark the draft reviewed when appropriate. It remains an unverified proposal, not evidence of implementation. If the assessment or context changes, the app marks the draft out of date. Request failures preserve the previous draft.
+6. **Finish assessment** includes generated measures in the PDF and the versioned `generated_control_measures` JSON section, with model, generation time, review status, and an out-of-date flag. Credentials and connection-check results are excluded.
+
+Optional environment settings are `LOCAL_LLM_PROVIDER` (`Ollama`, `OpenAI-compatible`, or `OpenAI-compatible text`), `LOCAL_LLM_URL`, `LOCAL_LLM_API_KEY`, and `LOCAL_LLM_MODEL`. Local model requests use the documented [Ollama chat API](https://docs.ollama.com/api/chat), [compatible Chat Completions API](https://lmstudio.ai/docs/developer/openai-compat/chat-completions), or [text-completion API](https://lmstudio.ai/docs/developer/openai-compat/completions).
+
+Generated controls do not alter exposure, residual exposure, or completeness. The model cannot create new evidence or validated reduction percentages. Use **Model mitigation controls** to apply the existing illustrative discounts separately. Clickable structured source links are restricted to those already supplied with the assessment. Plain-text responses can contain invented citations; they are displayed as inert text. Model text can still be mistaken, inappropriate, or influenced by untrusted input; human review is necessary.
 
 ## How the assessment works
 

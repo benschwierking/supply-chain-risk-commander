@@ -4,14 +4,39 @@ A component exposure assessment tool. Import an SPDX 2.x or CycloneDX JSON SBOM,
 
 ## Quick start
 
-Python 3.11–3.13 recommended. From this project directory:
+Python 3.11–3.13 recommended. Run these commands from the project directory.
+
+### Ubuntu / Debian
+
+Install virtual-environment support through the operating system, then install the app inside its own environment:
 
 ```sh
-python3.13 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
+sudo apt update
+sudo apt install python3-venv
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m streamlit run app.py
 ```
+
+### macOS / other Linux distributions
+
+With Python and its `venv` module installed:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m streamlit run app.py
+```
+
+These commands use the virtual environment explicitly; shell activation is optional. On subsequent launches, run `.venv/bin/python -m streamlit run app.py` from this directory.
+
+### Troubleshooting: externally managed environment
+
+This error means pip is targeting a Python installation managed by the operating system. Use the `.venv/bin/python -m pip` command above instead of system `pip`, `pip3`, or `sudo pip`. Do not use `--break-system-packages` for this project. The suggested `apt install python3-xyz` message is generic guidance; the app dependencies belong in the virtual environment, not individual apt packages.
+
+If creating the environment reports that `ensurepip` is unavailable, install `python3-venv` and retry. If using a specific Python version, install its matching venv package (for example `python3.12-venv` for `python3.12`) when available from your distribution. Create a fresh virtual environment on each device; do not copy `.venv` between computers.
+
+Reference: [Python Packaging User Guide — virtual environments](https://packaging.python.org/en/latest/guides/installing-using-pip-and-virtual-environments/).
 
 Open http://localhost:8501. Optional: set `GITHUB_TOKEN` or enter a token in the sidebar. Public endpoints work without credentials within GitHub limits. No database or paid service is required. Data stays in Streamlit session memory; export before ending a session. Install requires internet; the offline demo does not after installation.
 

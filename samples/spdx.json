@@ -1,0 +1,93 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "Mission gateway demo",
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://example.org/scrc/demo",
+  "creationInfo": {
+    "creators": [
+      "Tool: SCRC demo generator"
+    ],
+    "created": "2026-10-15T00:00:00Z"
+  },
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-requests",
+      "name": "requests",
+      "versionInfo": "2.32.5",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "OTHER",
+          "referenceType": "website",
+          "referenceLocator": "https://github.com/psf/requests"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-urllib3",
+      "name": "urllib3",
+      "versionInfo": "2.5.0",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "OTHER",
+          "referenceType": "website",
+          "referenceLocator": "https://github.com/urllib3/urllib3"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-packaging",
+      "name": "packaging",
+      "versionInfo": "25.0",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "OTHER",
+          "referenceType": "website",
+          "referenceLocator": "https://github.com/pypa/packaging"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-certifi",
+      "name": "certifi",
+      "versionInfo": "2025.8.3",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "OTHER",
+          "referenceType": "website",
+          "referenceLocator": "https://github.com/certifi/python-certifi"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-idna",
+      "name": "idna",
+      "versionInfo": "3.10",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "OTHER",
+          "referenceType": "website",
+          "referenceLocator": "https://github.com/kjd/idna"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-charset-normalizer",
+      "name": "charset-normalizer",
+      "versionInfo": "3.4.3",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "OTHER",
+          "referenceType": "website",
+          "referenceLocator": "https://github.com/jawah/charset_normalizer"
+        }
+      ]
+    }
+  ]
+}

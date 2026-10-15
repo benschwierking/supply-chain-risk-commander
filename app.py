@@ -29,11 +29,11 @@ if st.session_state.view!='assessment':
     st.button('Back to assessment',key='back_assessment',on_click=go_assessment)
 st.markdown('<div class="brand"><img src="data:image/svg+xml;base64,'+base64.b64encode(Path('assets/favicon.svg').read_bytes()).decode()+'" alt="Anvil"/><h1>HEPHAESTUS</h1></div>',unsafe_allow_html=True)
 with st.sidebar:
-    st.subheader('Inventory', help='Choose an evidence source and import a CycloneDX or SPDX 2.x JSON inventory.')
+    st.subheader('Inventory', help='Choose an evidence source and import a CycloneDX, SPDX 2.x JSON, or SPDX 3 JSON-LD inventory.')
     coach('inventory')
     mode=st.radio('Evidence mode',['Offline scenario','Live GitHub'], help='Offline evidence is synthetic. Uploaded SBOMs never inherit demo findings.')
-    upload=st.file_uploader('Import an SBOM',type=['json'], help='CycloneDX or SPDX 2.x JSON, up to 10 MB. Repository links come from the file and require verification.')
-    sample=st.selectbox('Sample inventory',['CycloneDX','SPDX'], help='Bundled example inventories. Offline scenario values are synthetic, not findings about the listed projects.')
+    upload=st.file_uploader('Import an SBOM',type=['json','jsonld'], help='CycloneDX, SPDX 2.x JSON, or SPDX 3 JSON-LD, up to 10 MB. Repository links come from the file and require verification.')
+    sample=st.selectbox('Sample inventory',['CycloneDX','SPDX','SPDX 3'], help='Bundled example inventories. Offline scenario values are synthetic, not findings about the listed projects.')
     token=st.text_input('GitHub token (optional)',type='password',value=os.getenv('GITHUB_TOKEN',''), help='Token stays in this session and is never exported. Public requests can work without one. A token may increase rate limits; branch protection evidence may require additional permissions.')
     use_scorecard=st.checkbox('Include OpenSSF Scorecard',False, help='Fetch optional repository security-check context. Scorecard results are shown separately and do not affect this model.')
     tavily_key=st.text_input('Tavily API key (optional)',type='password',value=os.getenv('TAVILY_API_KEY',''), help='Enables contributor web-source research. The key stays in session and is never exported. Queries send public GitHub names, handles, and repository identifiers to Tavily only when you run research.')
@@ -50,7 +50,7 @@ if st.session_state.view=='readme':
     st.markdown(content)
     st.stop()
 
-raw=upload.getvalue() if upload else Path('samples/'+('cyclonedx.json' if sample=='CycloneDX' else 'spdx.json')).read_bytes()
+raw=upload.getvalue() if upload else Path('samples/'+{'CycloneDX':'cyclonedx.json','SPDX':'spdx.json','SPDX 3':'spdx3.json'}[sample]).read_bytes()
 try:
     fmt,components,warnings=parse_sbom(json.loads(raw))
 except (ValueError,TypeError,RecursionError) as exc:
@@ -60,6 +60,7 @@ fingerprint=hashlib.sha256(raw).hexdigest()[:16]
 context=fingerprint+mode
 if st.session_state.get('context') != context:
     st.session_state.context=context
+    st.session_state.component_choice=components[0]['id']
     st.session_state.assessments={}
     st.session_state.research_cache={}
     st.session_state.evidence={c['id']:synthetic(i) if mode=='Offline scenario' and not upload else {'mode':'unknown','factors':{},'notes':['Fetch live evidence to assess this uploaded component.'],'sources':[]} for i,c in enumerate(components)}

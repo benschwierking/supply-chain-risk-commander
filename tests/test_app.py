@@ -61,3 +61,11 @@ def test_unknown_can_finish_without_network(monkeypatch):
     app.radio[0].set_value('Live GitHub').run()
     app.button(key='finish_assessment').click().run()
     assert not app.exception and app.session_state.view=='report'
+
+def test_spdx3_sample_runs_through_assessment_and_report():
+    app=load()
+    next(box for box in app.selectbox if box.label=='Sample inventory').set_value('SPDX 3').run()
+    assert not app.exception and len(app.session_state.evidence)==6
+    assert len(app.metric)==4
+    app.button(key='finish_assessment').click().run()
+    assert not app.exception and app.session_state.view=='report'

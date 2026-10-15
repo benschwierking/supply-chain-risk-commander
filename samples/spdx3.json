@@ -1,0 +1,151 @@
+{
+  "@context": "https://spdx.org/rdf/3.0.1/spdx-context.jsonld",
+  "@graph": [
+    {
+      "type": "CreationInfo",
+      "@id": "_:creation",
+      "specVersion": "3.0.1",
+      "created": "2026-10-15T00:00:00Z",
+      "createdBy": [
+        "https://example.org/hephaestus/demo-tool"
+      ]
+    },
+    {
+      "type": "Tool",
+      "spdxId": "https://example.org/hephaestus/demo-tool",
+      "creationInfo": "_:creation",
+      "name": "HEPHAESTUS sample generator"
+    },
+    {
+      "type": "SpdxDocument",
+      "spdxId": "https://example.org/hephaestus/document",
+      "creationInfo": "_:creation",
+      "profileConformance": [
+        "core",
+        "software"
+      ],
+      "element": [
+        "https://example.org/hephaestus/requests",
+        "https://example.org/hephaestus/urllib3",
+        "https://example.org/hephaestus/packaging",
+        "https://example.org/hephaestus/certifi",
+        "https://example.org/hephaestus/idna",
+        "https://example.org/hephaestus/charset-normalizer"
+      ]
+    },
+    {
+      "type": "software_Package",
+      "spdxId": "https://example.org/hephaestus/requests",
+      "creationInfo": "_:creation",
+      "name": "requests",
+      "software_packageVersion": "2.32.5",
+      "software_packageUrl": "pkg:pypi/requests@2.32.5",
+      "externalRef": [
+        "_:repo-0"
+      ]
+    },
+    {
+      "type": "ExternalRef",
+      "@id": "_:repo-0",
+      "externalRefType": "sourceArtifact",
+      "locator": [
+        "https://github.com/psf/requests"
+      ]
+    },
+    {
+      "type": "software_Package",
+      "spdxId": "https://example.org/hephaestus/urllib3",
+      "creationInfo": "_:creation",
+      "name": "urllib3",
+      "software_packageVersion": "2.5.0",
+      "software_packageUrl": "pkg:pypi/urllib3@2.5.0",
+      "externalRef": [
+        "_:repo-1"
+      ]
+    },
+    {
+      "type": "ExternalRef",
+      "@id": "_:repo-1",
+      "externalRefType": "sourceArtifact",
+      "locator": [
+        "https://github.com/urllib3/urllib3"
+      ]
+    },
+    {
+      "type": "software_Package",
+      "spdxId": "https://example.org/hephaestus/packaging",
+      "creationInfo": "_:creation",
+      "name": "packaging",
+      "software_packageVersion": "25.0",
+      "software_packageUrl": "pkg:pypi/packaging@25.0",
+      "externalRef": [
+        "_:repo-2"
+      ]
+    },
+    {
+      "type": "ExternalRef",
+      "@id": "_:repo-2",
+      "externalRefType": "sourceArtifact",
+      "locator": [
+        "https://github.com/pypa/packaging"
+      ]
+    },
+    {
+      "type": "software_Package",
+      "spdxId": "https://example.org/hephaestus/certifi",
+      "creationInfo": "_:creation",
+      "name": "certifi",
+      "software_packageVersion": "2025.8.3",
+      "software_packageUrl": "pkg:pypi/certifi@2025.8.3",
+      "externalRef": [
+        "_:repo-3"
+      ]
+    },
+    {
+      "type": "ExternalRef",
+      "@id": "_:repo-3",
+      "externalRefType": "sourceArtifact",
+      "locator": [
+        "https://github.com/certifi/python-certifi"
+      ]
+    },
+    {
+      "type": "software_Package",
+      "spdxId": "https://example.org/hephaestus/idna",
+      "creationInfo": "_:creation",
+      "name": "idna",
+      "software_packageVersion": "3.10",
+      "software_packageUrl": "pkg:pypi/idna@3.10",
+      "externalRef": [
+        "_:repo-4"
+      ]
+    },
+    {
+      "type": "ExternalRef",
+      "@id": "_:repo-4",
+      "externalRefType": "sourceArtifact",
+      "locator": [
+        "https://github.com/kjd/idna"
+      ]
+    },
+    {
+      "type": "software_Package",
+      "spdxId": "https://example.org/hephaestus/charset-normalizer",
+      "creationInfo": "_:creation",
+      "name": "charset-normalizer",
+      "software_packageVersion": "3.4.3",
+      "software_packageUrl": "pkg:pypi/charset-normalizer@3.4.3",
+      "externalRef": [
+        "_:repo-5"
+      ]
+    },
+    {
+      "type": "ExternalRef",
+      "@id": "_:repo-5",
+      "externalRefType": "sourceArtifact",
+      "locator": [
+        "https://github.com/jawah/charset_normalizer"
+      ]
+    }
+  ]
+}

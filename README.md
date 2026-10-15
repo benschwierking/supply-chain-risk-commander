@@ -2,7 +2,7 @@
 
 HEPHAESTUS helps you review the open-source components in a software bill of materials (SBOM), examine public repository and contributor sources, and compare proposed safeguards against the consequences of a component failing in your operation.
 
-It supports SPDX 2.x and CycloneDX JSON inventories. It runs locally and includes a fictional offline scenario for learning. It does not detect malicious contributors or calculate a probability of compromise.
+It supports SPDX 2.x JSON, SPDX 3 JSON-LD graphs, and CycloneDX JSON inventories. It runs locally and includes a fictional offline scenario for learning. It does not detect malicious contributors or calculate a probability of compromise.
 
 ## Quick start
 
@@ -27,7 +27,7 @@ If pip reports **externally managed environment**, use the `.venv/bin/python -m 
 
 ## Your first assessment
 
-1. **Choose an inventory.** Start with a bundled sample or upload a JSON SBOM. Nested CycloneDX components are included. SPDX 3 graphs are not supported. Files are limited to 10 MB and inventories to 1,000 components.
+1. **Choose an inventory.** Start with a bundled sample or upload a JSON SBOM. Nested CycloneDX components are included. SPDX 3 graphs include Software Package nodes; files, agents, and relationships are not counted as components. Compact terms, expanded Core/Software IRIs, inline namespace prefixes, and locally linked external references are supported. Remote contexts and graph nodes are never fetched; unresolved or conflicting repository mappings stay unknown. This is an inventory reader, not a full RDF reasoner or SPDX schema validator. Files are limited to 10 MB and inventories to 1,000 components.
 2. **Verify mappings.** Open Inventory & repository mapping. Confirm that each package points to its actual upstream GitHub repository. A URL supplied in an SBOM is not independent evidence of that relationship. Unmapped packages remain available but cannot be researched automatically.
 3. **Choose evidence.** Offline scenario uses fictional observations for bundled samples. Uploaded inventories start unknown. Live GitHub collects current public repository observations. The optional GitHub token can increase API allowance and may permit more branch-setting evidence. Public endpoints can work without it.
 4. **Review and run research.** Select up to five repositories and 1–3 contributors each. Run research explicitly. GitHub observations are collected for scoring; if a Tavily key is supplied, two public-source searches run per contributor, at most 30 per run. Fewer contributors may be available. Deep extraction is off. Cached scopes are reused; Retry failed research reruns only partial or failed scopes. Retrying may consume additional searches. Research can take several minutes; progress is shown and requests have timeouts.
@@ -97,6 +97,7 @@ If you installed from a ZIP, download the latest source into a **new folder**, c
 
 ## References and validation
 
+- [SPDX 3.0.1 JSON-LD serialization](https://spdx.github.io/spdx-spec/v3.0.1/serializations/)
 - [GitHub REST repository API](https://docs.github.com/en/rest/repos/repos)
 - [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)
 - [Contributor research source](https://github.com/rockangator/tavily-contributor-research-demo) at revision `3b0b945370f6cf9be8aab0d6982c692d15d2e53b`; attribution and approved reuse are documented in THIRD_PARTY.md.

@@ -2,7 +2,7 @@
 import streamlit as st
 
 STEPS=[
- ('inventory','Choose an inventory','Use a sample to learn without uploading, or import CycloneDX/SPDX JSON. The file identifies packages and repository mappings; it does not prove their security.'),
+ ('inventory','Choose an inventory','Use a sample to learn without uploading, or import CycloneDX/SPDX JSON (including SPDX 3 JSON-LD graphs). The file identifies packages and repository mappings; it does not prove their security.'),
  ('mapping','Check repository mappings','Confirm that each package points to its actual upstream repository. Researching the wrong repository produces irrelevant observations. Unmapped packages stay unknown.'),
  ('connections','Choose evidence and connections','Offline sample values are fictional. Live GitHub provides repository observations. A GitHub token is optional; Tavily requires its own key for public-source research. Keys stay in this session. Neither tutorial navigation nor upload starts paid searches.'),
  ('research','Set a research scope','Choose up to five verified repositories and 1–3 contributors each. Two searches per contributor means at most 30 Tavily searches per run. Run research explicitly; cached results are reused. Missing sources are not negative findings.'),

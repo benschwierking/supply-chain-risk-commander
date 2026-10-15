@@ -24,12 +24,15 @@ def repository(value):
     return '/'.join(parts[:2]).removesuffix('.git')
 
 def parse_sbom(data):
+    if isinstance(data, list) or isinstance(data, dict) and '@graph' in data:
+        from spdx3 import parse_graph
+        return parse_graph(data, repository)
     if not isinstance(data, dict): raise ValueError('SBOM must be a JSON object.')
     if data.get('bomFormat') == 'CycloneDX':
         fmt, raw = 'CycloneDX', data.get('components', [])
     elif str(data.get('spdxVersion', '')).startswith('SPDX-2.'):
         fmt, raw = 'SPDX', data.get('packages', [])
-    else: raise ValueError('Use CycloneDX JSON or SPDX 2.x JSON. SPDX 3 graphs are not supported.')
+    else: raise ValueError('Use CycloneDX JSON, SPDX 2.x JSON, or an SPDX 3 JSON-LD @graph.')
     if not isinstance(raw, list): raise ValueError('Component inventory must be an array.')
     out, warnings, ids = [], [], set()
     def visit(items):

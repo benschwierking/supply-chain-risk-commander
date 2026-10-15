@@ -12,7 +12,7 @@ from reporting import pdf_report
 from tutorial import coach, start as start_tutorial, active as tutorial_active
 from connections import check_credential, connection_key
 from local_llm import PROVIDERS, local_base_url, list_models, preferred_model, control_context, context_fingerprint, generate_controls
-from mapping import MAX_LOOKUPS, package_ref, purl_type, pending_lookups, lookup_batch, candidate_options, apply_candidates
+from mapping import package_ref, purl_type, candidate_options, apply_candidates, auto_map_all
 
 st.set_page_config(page_title='HEPHAESTUS', page_icon='assets/favicon.svg', layout='wide', initial_sidebar_state='expanded')
 network_image=base64.b64encode(Path('assets/network.png').read_bytes()).decode()
@@ -158,6 +158,7 @@ if st.session_state.get('context') != context:
         st.session_state.mapping_provenance={}
         st.session_state.pop('mapping_input_updates',None)
         st.session_state.pop('mapping_applied',None)
+        st.session_state.pop('auto_mapping_summary',None)
         st.session_state.control_drafts={}
         st.session_state.control_contexts={}
         st.session_state.evidence={c['id']:synthetic(i) if mode=='Offline scenario' and not upload else unknown_evidence() for i,c in enumerate(components)}
@@ -171,7 +172,7 @@ for component in components:
         component['repo']=st.session_state.repository_overrides[component['id']]
         component['mapping']='User-supplied repository; verify upstream identity' if component['repo'] else 'Unmapped by user'
         if component['id'] in mapping_provenance:
-            component['mapping']='User-reviewed metadata suggestion; upstream identity not independently authenticated'
+            component['mapping']=('Automatically mapped from package metadata; upstream identity unverified' if mapping_provenance[component['id']].get('method')=='automatic' else 'User-reviewed metadata suggestion; upstream identity not independently authenticated')
 def build_payload():
     results={}
     for item in components:
@@ -210,35 +211,48 @@ else: st.caption('GitHub evidence · Verify repository mappings before relying o
 coach('mapping')
 unmapped=sum(not c['repo'] for c in components)
 with st.expander('Inventory & repository mapping',expanded=bool(upload and unmapped) or tutorial_active() and st.session_state.get('tutorial_step')==1):
+    if not upload:
+        st.info(f'Viewing the bundled {sample} sample ({len(components):,} components). Use Import an SBOM in the sidebar to load your own inventory.')
     st.caption(f'{len(components)-unmapped:,} of {len(components):,} components have GitHub mappings. Package names and registry identifiers alone do not establish the upstream repository.')
+    if st.button('Auto-map all components',key='auto_map_all',type='primary',disabled=not unmapped,help='Find and apply a single unambiguous GitHub repository for every unmapped component in the inventory. Processes all supported packages automatically, reuses cached metadata, and retries failed lookups. Sends package names and versions to public PyPI, npm, and Maven Central registries; GitHub-based Go paths are read locally. No tokens or mission inputs are sent. Existing mappings are preserved. No Tavily searches run.'):
+        progress=st.progress(0,text='Auto-mapping components')
+        summary=auto_map_all(components,mapping_cache,st.session_state.repository_overrides,evidence,mapping_provenance,
+            progress=lambda i,n:progress.progress(i/n,text=f'Auto-mapping: {i:,} of {n:,} unique packages'))
+        progress.empty()
+        st.session_state.auto_mapping_summary=summary
+        st.session_state.mapping_input_updates=summary['applied']
+        if summary['applied']:
+            st.session_state.pop('assessment_scope_'+context,None)
+            st.session_state.pop('research_repos_'+context,None)
+            st.session_state.pop('mapping_suggestions_'+context,None)
+        st.rerun()
+    if 'auto_mapping_summary' in st.session_state:
+        summary=st.session_state.auto_mapping_summary
+        message=f"Auto-mapped {len(summary['applied']):,} component(s). {unmapped:,} remain unresolved."
+        if summary['applied']: st.success(message+' Continue to Collect assessment evidence below.')
+        else: st.info(message+' Expand Mapping details and manual choices for unresolved packages.')
+    if not unmapped:
+        st.caption('No mapping needed: every component already has a repository. Continue to Collect assessment evidence below.')
+    else:
+        st.caption('One click finds and fills repository mappings across the whole inventory. Ambiguous or unavailable sources remain unresolved.')
     st.dataframe(components,hide_index=True,width='stretch')
-    if upload or unmapped or mapping_cache:
-        st.markdown('**Find upstream repositories**',help='Looks up public PyPI, npm, and Maven Central metadata, or reads GitHub-based Go package paths. Sends package names and versions to those registries without tokens, mission inputs, or Tavily searches. Results stay cached. Private registries and other package types require manual mappings. Publisher metadata needs your review; it does not establish upstream identity.')
+    with st.expander('Mapping details and manual choices'):
         types={}
         for item in components:
             if not item['repo']:
                 kind=purl_type(item.get('purl'))
                 types[kind]=types.get(kind,0)+1
-        st.caption('Unmapped package types: '+', '.join(f'{kind}: {count:,}' for kind,count in sorted(types.items()))+'.' if types else 'Every component has a repository mapping. Review the sources before collection.')
-        st.caption('Find candidates from public package metadata, then review and apply. Up to 25 unique packages per click; discovery does not collect assessment evidence.')
-        pending=pending_lookups(components,mapping_cache)
-        retry_pending=pending_lookups(components,mapping_cache,retry=True)
-        st.caption(f'{len(pending):,} supported package lookup(s) remaining · {len(retry_pending):,} failed lookup(s) available to retry.')
-        find_col,retry_col=st.columns(2)
-        find_mappings=find_col.button('Find repository mappings',key='find_mappings',disabled=not pending,help='Discover candidates only. Review suggestions and apply selected mappings before collecting evidence. No package code is downloaded or run.')
-        retry_mappings=retry_col.button('Retry failed mapping lookups',key='retry_mappings',disabled=not retry_pending)
-        if find_mappings or retry_mappings:
-            targets=list((retry_pending if retry_mappings else pending).values())[:MAX_LOOKUPS]
-            progress=st.progress(0,text='Finding repository mappings')
-            lookup_batch(targets,mapping_cache,retry=retry_mappings,progress=lambda i,n:progress.progress(i/n,text=f'Package metadata: {i} of {n}'))
-            progress.empty()
-            st.rerun()
+        if types: st.caption('Unresolved package types: '+', '.join(f'{kind}: {count:,}' for kind,count in sorted(types.items()))+'.')
         lookup_rows=[]
         for item in components:
             ref=package_ref(item.get('purl'))
             record=mapping_cache.get(ref['key'],{}) if ref else {}
             if record:
-                lookup_rows.append({'Component':item['name'],'ID':item['id'],'Status':'applied' if item['id'] in mapping_provenance else record['status'],'Suggested repositories':', '.join(c['repository'] for c in record['candidates']),'Metadata source':record['source_url'],'Details':record['message']})
+                applied_method=mapping_provenance.get(item['id'],{}).get('method')
+                status='auto-mapped' if applied_method=='automatic' else 'applied' if item['id'] in mapping_provenance else record['status']
+                lookup_rows.append({'Component':item['name'],'ID':item['id'],'Status':status,'Suggested repositories':', '.join(c['repository'] for c in record['candidates']),'Metadata source':record['source_url'],'Details':record['message']})
+            elif not item['repo']:
+                lookup_rows.append({'Component':item['name'],'ID':item['id'],'Status':'unresolved','Suggested repositories':'','Metadata source':None,'Details':'Not looked up yet or no supported package URL. Run Auto-map all components, or enter a repository manually.'})
         if lookup_rows: st.dataframe(lookup_rows,hide_index=True,width='stretch',column_config={'Metadata source':st.column_config.LinkColumn('Metadata source')})
         options=candidate_options(components,mapping_cache)
         selected_mappings=st.multiselect('Reviewed repository suggestions',list(options),key='mapping_suggestions_'+context,help='Review the metadata source and verify each upstream project. Select one repository per component, then apply. Ambiguous candidates need an explicit choice. Nothing is selected automatically.')
@@ -252,29 +266,29 @@ with st.expander('Inventory & repository mapping',expanded=bool(upload and unmap
                 st.session_state.mapping_applied=count
                 st.rerun()
             except ValueError as exc: st.error(str(exc))
-    if st.session_state.get('mapping_applied'):
-        st.success(f"Applied {st.session_state.pop('mapping_applied')} mapping(s). Select their repositories under Assessment evidence, then collect observations.")
-    mapping_id=st.selectbox('Component repository mapping',[c['id'] for c in components],format_func=lambda ref:next(c['name']+' ['+ref+']' for c in components if c['id']==ref),key='mapping_component_'+context)
-    mapping_component=next(c for c in components if c['id']==mapping_id)
-    mapping_input_key='mapping_value_'+context+mapping_id
-    if mapping_input_key not in st.session_state: st.session_state[mapping_input_key]=mapping_component['repo'] or ''
-    mapping_value=st.text_input('GitHub repository (owner/repository or URL)',key=mapping_input_key,help='Use the verified upstream GitHub repository. Leave blank to remove a mapping. This does not change the original SBOM. Saving a changed mapping clears only that component\'s old observations.')
-    if st.button('Save repository mapping',key='save_mapping'):
-        try:
-            new_repo=repository_input(mapping_value)
-            if new_repo!=mapping_component['repo']:
-                st.session_state.setdefault('repository_overrides',{})[mapping_id]=new_repo
-                mapping_provenance.pop(mapping_id,None)
-                evidence[mapping_id]=unknown_evidence()
-                st.session_state.pop('assessment_scope_'+context,None)
-                st.session_state.pop('research_repos_'+context,None)
-            st.rerun()
-        except ValueError as exc: st.error(str(exc))
+        if st.session_state.get('mapping_applied'):
+            st.success(f"Applied {st.session_state.pop('mapping_applied')} mapping(s). Select their repositories under Assessment evidence, then collect observations.")
+        mapping_id=st.selectbox('Component repository mapping',[c['id'] for c in components],format_func=lambda ref:next(c['name']+' ['+ref+']' for c in components if c['id']==ref),key='mapping_component_'+context)
+        mapping_component=next(c for c in components if c['id']==mapping_id)
+        mapping_input_key='mapping_value_'+context+mapping_id
+        if mapping_input_key not in st.session_state: st.session_state[mapping_input_key]=mapping_component['repo'] or ''
+        mapping_value=st.text_input('GitHub repository (owner/repository or URL)',key=mapping_input_key,help='Use the verified upstream GitHub repository. Leave blank to remove a mapping. This does not change the original SBOM. Saving a changed mapping clears only that component\'s old observations.')
+        if st.button('Save repository mapping',key='save_mapping'):
+            try:
+                new_repo=repository_input(mapping_value)
+                if new_repo!=mapping_component['repo']:
+                    st.session_state.setdefault('repository_overrides',{})[mapping_id]=new_repo
+                    mapping_provenance.pop(mapping_id,None)
+                    evidence[mapping_id]=unknown_evidence()
+                    st.session_state.pop('assessment_scope_'+context,None)
+                    st.session_state.pop('research_repos_'+context,None)
+                st.rerun()
+            except ValueError as exc: st.error(str(exc))
     st.download_button('Download imported SBOM' if upload else 'Download sample SBOM',raw,file_name='inventory.json',mime='application/json')
 repos=list(dict.fromkeys(c['repo'] for c in components if c['repo']))
 if upload:
     if unmapped:
-        st.warning(f'{unmapped:,} component(s) need repository mappings for GitHub collection. Use Find repository mappings under Inventory & repository mapping, review and apply suggestions, or enter a verified GitHub URL manually. Components with mappings can already be assessed.')
+        st.warning(f'{unmapped:,} component(s) need repository mappings for GitHub collection. Click Auto-map all components under Inventory & repository mapping. Components with mappings can already be assessed.')
     st.info('Upload imports the component list. Collect assessment evidence below to calculate exposure. Mission impact uses your three mission inputs; their initial values give 60.')
 
 st.subheader('Assessment evidence',help='Collect the GitHub observations used by exposure and completeness. This is separate from optional Tavily contributor-source research. It never spends Tavily credits.')
@@ -289,7 +303,7 @@ action_left,action_right=st.columns(2)
 action_left.button('Collect assessment evidence',key='collect_assessment',type='primary',disabled=not assessment_scope,on_click=request_assessment_collection,args=(assessment_scope,),help='Collect repository metadata, available branch settings, and contributors using your GitHub connection. Previously collected observations are reused. No Tavily searches run.')
 action_right.button('Retry missing evidence',key='retry_assessment',disabled=not assessment_scope,on_click=request_assessment_retry,args=(assessment_scope,),help='Retry selected repositories with failed or partial collection, for example after replacing an expired token. Repositories without failures use cached observations.')
 if not repos:
-    st.info('Collection is unavailable because this inventory has no GitHub repository mappings. Use Find repository mappings, then review and apply suggestions; or enter and save a verified GitHub URL manually. Mission inputs, local control drafting, and reports can still be used without a mapping.')
+    st.info('Collection is unavailable because this inventory has no GitHub repository mappings. Click Auto-map all components under Inventory & repository mapping. Mission inputs, local control drafting, and reports can still be used without a mapping.')
 elif not assessment_scope:
     st.info('Select at least one repository in Repositories for assessment to enable collection. Your evidence-mode setting does not block this action.')
 else:

@@ -5,7 +5,7 @@ import requests
 from core import score
 from evidence import unknown_evidence
 from mapping import (MAX_LOOKUPS, MAX_BYTES, TIMEOUT, package_ref, lookup_plan,
-                     lookup_repository, lookup_batch, pending_lookups, candidate_options, apply_candidates)
+                     lookup_repository, lookup_batch, pending_lookups, candidate_options, apply_candidates, auto_map_all)
 
 
 class Response:
@@ -134,3 +134,48 @@ def test_review_required_and_ambiguous_selection_rejected_without_side_effects()
     assert overrides == {'one': 'acme/project', 'two': 'acme/project'}
     assert provenance['one']['lookup_key'] == key
     assert score(observations['one'], [5, 3, 1], ['review']) == original
+
+
+def test_auto_map_all_processes_221_packages_deduplicates_and_preserves_existing(monkeypatch):
+    calls, progress = [], []
+    def lookup(purl):
+        calls.append(purl)
+        name = package_ref(purl)['parts'][0]
+        return {'status': 'candidate', 'candidates': [{'repository': 'acme/' + name}]}
+    monkeypatch.setattr('mapping.lookup_repository', lookup)
+    components = [{'id': str(i), 'repo': None, 'purl': f'pkg:pypi/package{i}@1'} for i in range(221)]
+    components += [{'id': 'duplicate', 'repo': None, 'purl': 'pkg:pypi/package0@1'},
+                   {'id': 'existing', 'repo': 'verified/existing', 'purl': 'pkg:pypi/do-not-look-up@1'}]
+    cache, overrides, provenance = {}, {}, {}
+    evidence = {c['id']: unknown_evidence() for c in components}
+    evidence['existing'] = {'factors': {'archived': 1}}
+    summary = auto_map_all(components, cache, overrides, evidence, provenance, lambda i,n: progress.append((i,n)))
+    assert len(calls) == 221 and len(set(calls)) == 221
+    assert len(summary['applied']) == 222 and summary['remaining'] == {}
+    assert progress[-1] == (221, 221) and [i for i,_ in progress] == list(range(1,222))
+    assert overrides['duplicate'] == overrides['0'] == 'acme/package0'
+    assert 'existing' not in overrides and evidence['existing']['factors']['archived'] == 1
+    assert all(p['method'] == 'automatic' and 'not independently authenticated' in p['review'] for p in provenance.values())
+    again = auto_map_all(components, cache, overrides, evidence, provenance)
+    assert len(calls) == 221 and again['applied'] == {} and again['processed_packages'] == 0
+
+
+def test_auto_map_all_cached_candidates_failed_retry_and_unresolved_sources(monkeypatch):
+    components = [{'id': name, 'repo': None, 'purl': f'pkg:pypi/{name}@1'} for name in ['cached','ambiguous','failed','missing']]
+    components += [{'id': 'unsupported', 'repo': None, 'purl': 'pkg:deb/debian/example@1'}]
+    cache = {
+        package_ref(c['purl'])['key']: {'status': c['id'], 'candidates': []} for c in components[:4]
+    }
+    cache[package_ref(components[0]['purl'])['key']] = {'status':'candidate', 'candidates':[{'repository':'acme/cached'}]}
+    cache[package_ref(components[1]['purl'])['key']]['candidates'] = [{'repository':'one/project'}, {'repository':'two/project'}]
+    cache[package_ref(components[3]['purl'])['key']]['status'] = 'not_found'
+    calls = []
+    monkeypatch.setattr('mapping.lookup_repository', lambda purl:calls.append(purl) or {'status':'failed','candidates':[]})
+    evidence = {c['id']: unknown_evidence() for c in components}
+    before = score(evidence['cached'], [4,2,5], ['review'])
+    overrides, provenance = {}, {}
+    result = auto_map_all(components, cache, overrides, evidence, provenance)
+    assert calls == ['pkg:pypi/failed@1']
+    assert result['applied'] == {'cached':'acme/cached'}
+    assert result['remaining'] == {'ambiguous':'ambiguous','failed':'failed','missing':'not_found','unsupported':'unsupported'}
+    assert score(evidence['cached'], [4,2,5], ['review']) == before

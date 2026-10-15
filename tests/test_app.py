@@ -10,6 +10,10 @@ def controls(app): return next(m for m in app.multiselect if m.label=='Model mit
 def test_scenario_controls_and_component_persistence():
     app=load()
     assert not app.exception
+    assert app.button(key='auto_map_all').disabled
+    assert app.button(key='apply_mappings').disabled
+    assert any('Viewing the bundled CycloneDX sample (6 components)' in item.value for item in app.info)
+    assert any('No mapping needed' in item.value for item in app.caption)
     controls(app).select('review').run()
     assert app.metric[2].value=='65.2'
     app.slider[0].set_value(5).run()
@@ -18,6 +22,7 @@ def test_scenario_controls_and_component_persistence():
     assert app.slider[0].value==5 and controls(app).value==['review']
     app.radio[0].set_value('Live GitHub').run()
     assert not app.exception and app.metric[1].value=='Unknown'
+    assert app.button(key='auto_map_all').disabled
 
 def test_help_report_navigation_preserves_assessment():
     app=load()
@@ -96,7 +101,7 @@ def uploaded_app(monkeypatch, components):
     monkeypatch.setattr('streamlit.file_uploader', lambda *args, **kwargs:BytesIO(raw))
     return load()
 
-def test_missing_mappings_explain_blocker_and_explicit_lookup_then_review(monkeypatch):
+def test_missing_mappings_auto_map_with_one_click_preserve_inputs_and_enable_collection(monkeypatch):
     calls=[]
     collected=[]
     exports=[]
@@ -107,19 +112,21 @@ def test_missing_mappings_explain_blocker_and_explicit_lookup_then_review(monkey
     monkeypatch.setattr('reporting.pdf_report',lambda payload:exports.append(payload) or b'%PDF-1.4 test')
     monkeypatch.setattr('evidence.collect',lambda repo,*args:collected.append(repo) or {'mode':'live GitHub REST','factors':{'archived':0},'sources':[],'notes':[]})
     app=uploaded_app(monkeypatch,[{'name':'one','bom-ref':'one','purl':'pkg:pypi/project@1'},{'name':'two','bom-ref':'two','purl':'pkg:pypi/project@1'}])
+    assert not any('Viewing the bundled' in item.value for item in app.info)
+    assert not app.button(key='auto_map_all').disabled
     assert app.button(key='collect_assessment').disabled and app.button(key='run_research').disabled
     assert 'Switch to' not in app.button(key='collect_assessment').help
     assert any('no GitHub repository mappings' in item.value for item in app.info)
     assert calls==[] and collected==[]
     app.slider[0].set_value(5).run()
-    app.button(key='find_mappings').click().run()
+    app.button(key='auto_map_all').click().run()
     assert not app.exception and len(calls)==1 and not collected
-    assert app.button(key='collect_assessment').disabled
-    assert app.multiselect(key='mapping_suggestions_'+app.session_state.context).value==[]
+    assert not app.button(key='collect_assessment').disabled
+    assert app.button(key='auto_map_all').disabled
+    assert app.session_state.mapping_provenance['one']['method']=='automatic'
+    assert any('Auto-mapped 2 component(s). 0 remain unresolved.' in item.value for item in app.success)
     app.run()
     assert len(calls)==1
-    app.multiselect(key='mapping_suggestions_'+app.session_state.context).set_value(['one → acme/project','two → acme/project']).run()
-    app.button(key='apply_mappings').click().run()
     assert not app.exception and not app.button(key='collect_assessment').disabled
     assert not collected and app.slider[0].value==5 and app.metric[1].value=='Unknown'
     assert next(t for t in app.text_input if t.label=='GitHub repository (owner/repository or URL)').value=='acme/project'
@@ -131,6 +138,7 @@ def test_missing_mappings_explain_blocker_and_explicit_lookup_then_review(monkey
     assert not app.exception and app.slider[0].value==5 and len(calls)==1
     app.button(key='finish_assessment').click().run()
     assert not app.exception and exports[-1]['repository_mapping_discovery']['component_associations']['two']['repository']=='acme/project'
+    assert exports[-1]['repository_mapping_discovery']['component_associations']['two']['method']=='automatic'
     assert exports[-1]['sbom_sha256']
 
 def test_research_button_chooses_live_without_separate_mode_switch(monkeypatch):

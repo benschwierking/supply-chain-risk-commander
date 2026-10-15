@@ -1,4 +1,4 @@
-"""Explicit, bounded package-metadata lookups. Candidates always require review."""
+"""Bounded package-metadata lookups and explicit whole-inventory auto-mapping."""
 import hashlib
 import json
 import re
@@ -130,7 +130,7 @@ def lookup_repository(purl):
     result.update(package={'type': plan['type'], 'path': '/'.join(plan['parts']), 'version': plan['version']}, source_url=plan['url'])
     if plan['direct']:
         repo = plan['direct']
-        result.update(status='candidate', candidates=[{'repository': repo, 'url': 'https://github.com/' + repo, 'fields': ['package URL']}], message='Repository named in the package URL; review before applying.')
+        result.update(status='candidate', candidates=[{'repository': repo, 'url': 'https://github.com/' + repo, 'fields': ['package URL']}], message='Repository named in the package URL; upstream identity not independently authenticated.')
         return result
     try:
         # No GitHub/Tavily credentials, .netrc authentication, cookies, or redirects.
@@ -149,7 +149,7 @@ def lookup_repository(purl):
                     chunks.append(chunk)
                 candidates = _candidates(plan, b''.join(chunks))
         result.update(candidates=candidates, status='candidate' if len(candidates) == 1 else 'ambiguous' if candidates else 'not_found',
-                      message='Publisher metadata; verify upstream identity before applying.' if candidates else 'No explicit GitHub source found. Parent POMs, private registries, and other hosts are not resolved; enter a mapping manually.')
+                      message='Publisher metadata; upstream identity not independently authenticated.' if candidates else 'No explicit GitHub source found. Parent POMs, private registries, and other hosts are not resolved; enter a mapping manually.')
     except (requests.RequestException, ValueError, ElementTree.ParseError, RecursionError):
         result.update(status='failed', message='Registry lookup failed or returned unsupported metadata. Retry later or enter a mapping manually.')
     return result
@@ -205,5 +205,51 @@ def apply_candidates(selected, options, overrides, evidence, provenance):
     for ref, repo, key in chosen:
         overrides[ref] = repo
         evidence[ref] = unknown_evidence()
-        provenance[ref] = {'lookup_key': key, 'repository': repo, 'review': 'User selected and applied; upstream identity not independently authenticated'}
+        provenance[ref] = {'lookup_key': key, 'repository': repo, 'method': 'manual', 'review': 'User selected and applied; upstream identity not independently authenticated'}
     return len(chosen)
+
+
+def auto_map_all(components, cache, overrides, evidence, provenance, progress=None):
+    """Process every unmapped component in one action; retain ambiguous/unknowns.
+
+    Batches are internal, with at most four requests in flight. Successful
+    metadata is reused; each previously failed lookup gets one retry per action.
+    Existing mappings/evidence are preserved. Automatic mappings are unverified.
+    """
+    from evidence import unknown_evidence
+    inventory = [{**c, 'repo': overrides.get(c['id'], c.get('repo'))} for c in components]
+    missing = [c for c in inventory if not c['repo']]
+    applied = {}
+
+    def apply_available():
+        for component in missing:
+            if component['id'] in applied: continue
+            ref = package_ref(component.get('purl'))
+            if not ref: continue
+            record = cache.get(ref['key'], {})
+            candidates = record.get('candidates', [])
+            if record.get('status') != 'candidate' or len(candidates) != 1: continue
+            repo = repository_input(candidates[0]['repository'])
+            if not repo: continue
+            applied[component['id']] = repo
+            overrides[component['id']] = repo
+            evidence[component['id']] = unknown_evidence()
+            provenance[component['id']] = {
+                'lookup_key': ref['key'], 'repository': repo, 'method': 'automatic',
+                'review': 'Automatically applied from one metadata candidate; upstream identity not independently authenticated',
+            }
+
+    pending = {**pending_lookups(inventory, cache), **pending_lookups(inventory, cache, retry=True)}
+    targets = list(pending.values())
+    apply_available()
+    for offset in range(0, len(targets), MAX_LOOKUPS):
+        lookup_batch(targets[offset:offset + MAX_LOOKUPS], cache, retry=True,
+                     progress=(lambda done, total, offset=offset: progress(offset + done, len(targets))) if progress else None)
+        apply_available()
+    remaining = {}
+    for component in missing:
+        if component['id'] in applied: continue
+        ref = package_ref(component.get('purl'))
+        record = cache.get(ref['key'], {}) if ref else {}
+        remaining[component['id']] = record.get('status', 'unsupported')
+    return {'applied': applied, 'remaining': remaining, 'processed_packages': len(targets)}

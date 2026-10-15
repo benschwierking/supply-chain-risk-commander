@@ -56,7 +56,7 @@ def repository_input(value):
         raise ValueError('Enter a GitHub repository URL or owner/repository, or leave blank to remove the mapping.')
     return repo
 
-def parse_sbom(data):
+def _parse_inventory(data):
     warnings = []
     # The GitHub dependency-graph API wraps the SPDX document in an sbom field.
     if isinstance(data, dict) and not any(k in data for k in ('bomFormat', 'spdxVersion', '@graph')) and isinstance(data.get('sbom'), dict):
@@ -108,6 +108,13 @@ def parse_sbom(data):
     if len(out) > 1000: raise ValueError('Inventory limit is 1,000 components. Export a smaller component inventory.')
     return fmt, out, warnings
 
+def parse_sbom(data):
+    fmt, components, warnings = _parse_inventory(data)
+    from dependencies import attach_dependencies
+    attach_dependencies(data, components, warnings)
+    return fmt, components, warnings
+
+
 def score(evidence, impact, selected=()):
     """Unknown factors excluded from normalized exposure; completeness reported separately."""
     vals = evidence.get('factors', {})
@@ -124,7 +131,7 @@ def score(evidence, impact, selected=()):
                 selected_controls=list(selected), impact_inputs=list(impact))
 
 def sidecar(components, evidence, results, source, research=None):
-    return dict(schema='hephaestus-risk-sidecar/1.1', application='HEPHAESTUS', contributor_research=research or {}, component_repository_map={c['id']:c.get('repo') for c in components}, generated_at=datetime.now(timezone.utc).isoformat(), source=source,
+    return dict(schema='hephaestus-risk-sidecar/1.3', application='HEPHAESTUS', contributor_research=research or {}, component_repository_map={c['id']:c.get('repo') for c in components}, generated_at=datetime.now(timezone.utc).isoformat(), source=source,
                 model='weighted-observed-exposure-v1', baseline=BASELINE,
                 limitations=['Ordinal decision support, not probability or maliciousness detection.', 'Unknown factors excluded; low completeness can hide exposure.', 'Repository-level present-day evidence is not release-specific.', 'Contributor identities and U.S. Person status unverified; authorized attestation required.', 'Mitigation effects are analyst assumptions, not verified implementation.'],
                 components=[dict(**c, evidence=evidence.get(c['id'],{}), assessment=results[c['id']]) for c in components])

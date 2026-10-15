@@ -4,6 +4,7 @@ No tools, code execution, remote URLs, or automatic score changes are supported.
 """
 import ipaddress
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 import requests
@@ -93,7 +94,11 @@ def control_context(component, evidence, assessment, operational_context=''):
 
 
 def context_fingerprint(context):
-    return connection_key(json.dumps(context,sort_keys=True))
+    stable=deepcopy(context)
+    assessment=stable.get('assessment',{})
+    for key in ('residual','selected_controls','priority'): assessment.pop(key,None)
+    for driver in assessment.get('drivers',[]): driver.pop('modeled_reduction',None)
+    return connection_key(json.dumps(stable,sort_keys=True))
 
 
 def _redact(text, secrets):

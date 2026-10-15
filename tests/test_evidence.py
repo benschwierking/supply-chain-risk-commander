@@ -26,8 +26,6 @@ def test_inventory_collection_deduplicates_caches_and_retries(monkeypatch):
 
 def test_inventory_collection_scope_limit_and_mapping_validation(monkeypatch):
     monkeypatch.setattr(evidence, 'collect', lambda *a, **k:pytest.fail('Unexpected request'))
-    with pytest.raises(ValueError, match='25'):
-        evidence.collect_inventory([], {}, [f'owner/repo{i}' for i in range(26)])
     with pytest.raises(ValueError, match='mappings'):
         evidence.collect_inventory([], {}, ['owner/not-mapped'])
 

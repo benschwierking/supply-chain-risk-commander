@@ -2,13 +2,19 @@ import base64
 import hashlib
 import json
 import os
+import time
+from datetime import datetime
+from copy import deepcopy
 from pathlib import Path
 import streamlit as st
 import plotly.graph_objects as go
 from core import read_sbom, repository_input, score, sidecar, CONTROLS, BASELINE
-from evidence import collect, collect_inventory, collection_status, unknown_evidence, synthetic
+from evidence import (collect, collect_inventory, collection_status, unknown_evidence, synthetic,
+                      new_collection, step_collection, stop_collection, resume_collection, collection_counts, inventory_signature)
 from research import run_batch
-from reporting import pdf_report
+from reporting import pdf_report, matrix_figure
+from mission import initialize as initialize_mission, assign as assign_mission, undo as undo_mission
+from control_plan import prepare_draft, invalidate_draft, selected_plan, priorities, priority_value, justification, selectable
 from tutorial import coach, start as start_tutorial, active as tutorial_active
 from connections import check_credential, connection_key
 from local_llm import PROVIDERS, local_base_url, list_models, preferred_model, control_context, context_fingerprint, generate_controls
@@ -19,11 +25,14 @@ network_image=base64.b64encode(Path('assets/network.png').read_bytes()).decode()
 st.markdown("<style>" + Path('assets/theme.css').read_text() + ":root{--network-image:url(data:image/png;base64,"+network_image+");}</style>", unsafe_allow_html=True)
 if 'view' not in st.session_state: st.session_state.view='assessment'
 def go_assessment(): st.session_state.view='assessment'
-def go_readme(): st.session_state.view='readme'
+def go_readme():
+    stop_collection(st.session_state.get('collection_job'))
+    st.session_state.view='readme'
 def request_assessment_collection(repositories):
     st.session_state.evidence_mode='Live GitHub'
     st.session_state.collect_assessment_requested=True
     st.session_state.assessment_requested_repos=list(repositories)
+    st.session_state.retry_assessment_requested=False
 def request_assessment_retry(repositories):
     request_assessment_collection(repositories)
     st.session_state.retry_assessment_requested=True
@@ -63,7 +72,7 @@ st.markdown('<div class="brand"><img src="data:image/svg+xml;base64,'+base64.b64
 with st.sidebar:
     st.subheader('Inventory', help='Choose an evidence source and import a CycloneDX, SPDX 2.x JSON, or SPDX 3 JSON-LD inventory.')
     coach('inventory')
-    mode=st.radio('Evidence mode',['Offline scenario','Live GitHub'],key='evidence_mode', help='Offline evidence is synthetic for bundled samples only. Uploaded SBOMs start without evidence. Collect assessment evidence switches to Live GitHub and collects observations after you click; upload alone does not start requests.')
+    mode=st.radio('Evidence mode',['Offline scenario','Live GitHub'],key='evidence_mode', help='Offline evidence is synthetic for bundled samples only. Uploaded SBOMs start without evidence. Collect all GitHub evidence switches to Live GitHub and collects observations after you click; upload alone does not start requests.')
     upload=st.file_uploader('Import an SBOM',type=['json','jsonld'], help='CycloneDX, SPDX 2.x JSON, or SPDX 3 JSON-LD, up to 10 MB. Repository links come from the file and require verification.')
     upload_status=st.empty()
     sample=st.selectbox('Sample inventory',['CycloneDX','SPDX','SPDX 3'], help='Bundled example inventories. Offline scenario values are synthetic, not findings about the listed projects.')
@@ -136,6 +145,7 @@ raw=upload.getvalue() if upload else Path('samples/'+{'CycloneDX':'cyclonedx.jso
 try:
     fmt,components,warnings=read_sbom(raw)
 except (ValueError,TypeError,RecursionError) as exc:
+    stop_collection(st.session_state.get('collection_job'))
     if upload:
         upload_status.error('Inventory could not be loaded. See the error in the main panel.')
     st.error(f'Cannot read inventory: {exc}')
@@ -145,13 +155,15 @@ if upload:
     upload_status.success(f'Loaded {fmt} · {len(components):,} components')
 for w in warnings: st.warning(w)
 fingerprint=hashlib.sha256(raw).hexdigest()[:16]
-context=fingerprint+('uploaded' if upload else mode)
+context=fingerprint+('uploaded' if upload else 'sample')
 if st.session_state.get('context') != context:
-    migrated_upload=bool(upload and st.session_state.get('context') in (fingerprint+'Offline scenario',fingerprint+'Live GitHub'))
+    migrated_upload=st.session_state.get('context') in (fingerprint+'Offline scenario',fingerprint+'Live GitHub')
     st.session_state.context=context
     if not migrated_upload:
         st.session_state.component_choice=components[0]['id']
         st.session_state.assessments={}
+        st.session_state.pop('collection_job',None)
+        st.session_state.pop('mission_undo',None)
         st.session_state.research_cache={}
         st.session_state.repository_overrides={}
         st.session_state.mapping_lookup_cache={}
@@ -160,9 +172,19 @@ if st.session_state.get('context') != context:
         st.session_state.pop('mapping_applied',None)
         st.session_state.pop('auto_mapping_summary',None)
         st.session_state.control_drafts={}
+        st.session_state.control_draft_history={}
         st.session_state.control_contexts={}
         st.session_state.evidence={c['id']:synthetic(i) if mode=='Offline scenario' and not upload else unknown_evidence() for i,c in enumerate(components)}
 evidence=st.session_state.evidence
+if not upload and st.session_state.get('last_sample_mode') != mode:
+    if mode == 'Live GitHub':
+        for item in components:
+            if evidence[item['id']].get('mode','').startswith('SYNTHETIC'): evidence[item['id']]=unknown_evidence()
+    elif st.session_state.get('last_sample_mode') is not None:
+        stop_collection(st.session_state.get('collection_job'))
+        evidence.update({item['id']:synthetic(i) for i,item in enumerate(components)})
+    st.session_state.last_sample_mode=mode
+initialize_mission(components,st.session_state.assessments)
 mapping_cache=st.session_state.setdefault('mapping_lookup_cache',{})
 mapping_provenance=st.session_state.setdefault('mapping_provenance',{})
 for ref,repo in st.session_state.pop('mapping_input_updates',{}).items():
@@ -180,24 +202,38 @@ def build_payload():
         results[item['id']]=score(evidence[item['id']],saved['inputs'],saved['controls'])
     payload=sidecar(components,evidence,results,mode+' / '+('uploaded SBOM' if upload else 'bundled sample inventory'),st.session_state.get('research_cache',{}))
     payload['sbom_sha256']=hashlib.sha256(raw).hexdigest()
-    payload['schema']='hephaestus-risk-sidecar/1.2'
+    payload['schema']='hephaestus-risk-sidecar/1.3'
+    payload['mission_assignment']={'schema':'hephaestus-mission-assignment/1.0','method':'dependency-reach-v1','components':{ref:{k:deepcopy(v) for k,v in saved.items() if k!='controls'} for ref,saved in st.session_state.assessments.items()}}
+    for item in payload['components']: item['assessment']['priority']=priority_value(item['assessment'])
     payload['generated_control_measures']={}
+    payload['generated_control_history']=deepcopy(st.session_state.get('control_draft_history',{}))
     payload['repository_mapping_discovery']={'schema':'hephaestus-repository-mappings/1.0','records':mapping_cache,'component_associations':mapping_provenance}
     for item in components:
         draft=st.session_state.get('control_drafts',{}).get(item['id'])
         if draft:
             current=control_context(item,evidence[item['id']],results[item['id']],st.session_state.get('control_contexts',{}).get(item['id'],''))
-            payload['generated_control_measures'][item['id']]={**draft,'stale':draft['context_fingerprint']!=context_fingerprint(current)}
+            invalidate_draft(draft,draft['context_fingerprint']!=context_fingerprint(current))
+            payload['generated_control_measures'][item['id']]=deepcopy(draft)
     return payload
 @st.cache_data(show_spinner=False,max_entries=8)
 def report_bytes(serialized): return pdf_report(json.loads(serialized))
 if st.session_state.view=='report':
     payload=build_payload()
-    st.subheader('Assessment report',help='All components are included, including those with missing observations. Proposed controls remain modeled assumptions.')
-    st.dataframe([{'Component':c['name'],'Impact':c['assessment']['impact'],'Exposure':display_score(c['assessment']['exposure']),'Residual':display_score(c['assessment']['residual']),'Coverage %':c['assessment']['completeness'],'Evidence status':collection_status(c['evidence'],c.get('repo'))} for c in payload['components']],hide_index=True,width='stretch')
-    st.caption('Impact is calculated from your mission inputs. The starting values of 3/5 each give 60; review them for each component. Unknown exposure means observations are missing, not that exposure is zero.')
-    if payload['generated_control_measures']: st.caption('Generated control measures are included in the downloads with model provenance and review status. Out-of-date drafts remain clearly labeled and do not affect scoring.')
-    for limitation in payload['limitations']: st.caption(limitation)
+    st.subheader('Assessment report')
+    st.plotly_chart(matrix_figure(payload),use_container_width=True)
+    st.subheader('Ten highest-priority components')
+    st.dataframe([{'Component':c['name']+' / '+c['version'],'Priority':priority_value(c['assessment']),
+                   'Before':c['assessment']['exposure'],'After':c['assessment']['residual'],
+                   'Coverage %':c['assessment']['completeness'],'Justification':justification(c)} for c in priorities(payload)],hide_index=True,width='stretch')
+    unknown=sum(c['assessment']['exposure'] is None for c in payload['components'])
+    st.caption(f'{unknown} component(s) have unknown exposure and are excluded from the matrix and ranking. '+payload['source'])
+    st.subheader('Selected implementation plan')
+    plan=selected_plan(payload)
+    if plan:
+        st.dataframe([{'Control':row['control'],'Actions':'\n'.join(row['actions']),
+                       'Applies to':'\n'.join(row['components'])} for row in plan],hide_index=True,width='stretch')
+    else: st.info('No controls selected for implementation')
+    st.caption('Proposed, not verified implemented. Green points reflect selected modeled controls only. Full evidence and all drafts remain in JSON.')
     serialized=json.dumps(payload,indent=2)
     st.download_button('Download PDF report',report_bytes(serialized),file_name='hephaestus-assessment.pdf',mime='application/pdf')
     st.download_button('Download JSON sidecar',serialized,file_name='hephaestus-sidecar.json',mime='application/json')
@@ -229,13 +265,13 @@ with st.expander('Inventory & repository mapping',expanded=bool(upload and unmap
     if 'auto_mapping_summary' in st.session_state:
         summary=st.session_state.auto_mapping_summary
         message=f"Auto-mapped {len(summary['applied']):,} component(s). {unmapped:,} remain unresolved."
-        if summary['applied']: st.success(message+' Continue to Collect assessment evidence below.')
+        if summary['applied']: st.success(message+' Continue to Collect all GitHub evidence below.')
         else: st.info(message+' Expand Mapping details and manual choices for unresolved packages.')
     if not unmapped:
-        st.caption('No mapping needed: every component already has a repository. Continue to Collect assessment evidence below.')
+        st.caption('No mapping needed: every component already has a repository. Continue to Collect all GitHub evidence below.')
     else:
         st.caption('One click finds and fills repository mappings across the whole inventory. Ambiguous or unavailable sources remain unresolved.')
-    st.dataframe(components,hide_index=True,width='stretch')
+    st.dataframe([{k:v for k,v in item.items() if k!='dependency'} for item in components],hide_index=True,width='stretch')
     with st.expander('Mapping details and manual choices'):
         types={}
         for item in components:
@@ -289,38 +325,59 @@ repos=list(dict.fromkeys(c['repo'] for c in components if c['repo']))
 if upload:
     if unmapped:
         st.warning(f'{unmapped:,} component(s) need repository mappings for GitHub collection. Click Auto-map all components under Inventory & repository mapping. Components with mappings can already be assessed.')
-    st.info('Upload imports the component list. Collect assessment evidence below to calculate exposure. Mission impact uses your three mission inputs; their initial values give 60.')
+    st.info('Upload imports the component list. Collect all GitHub evidence below to calculate exposure. Mission impact uses your three mission inputs; their initial values give 60.')
 
 st.subheader('Assessment evidence',help='Collect the GitHub observations used by exposure and completeness. This is separate from optional Tavily contributor-source research. It never spends Tavily credits.')
 coach('assessment_collection')
-if st.session_state.get('collect_assessment_requested'):
-    st.session_state['assessment_scope_'+context]=[repo for repo in st.session_state.get('assessment_requested_repos',[]) if repo in repos]
-if 'assessment_scope_'+context not in st.session_state:
-    st.session_state['assessment_scope_'+context]=repos[:25]
-assessment_scope=st.multiselect('Repositories for assessment',repos,max_selections=25,key='assessment_scope_'+context,help='Collect up to 25 repositories per run. Every component sharing a repository receives the same observations. Choose another group for larger inventories. Collected observations stay cached in this session.')
-st.caption('Collection uses GitHub only; a Tavily key is not needed. Up to 25 repositories per run. Missing observations stay unknown and are listed in Evidence.')
+job=st.session_state.get('collection_job')
+if job and job['signature']!=inventory_signature(components):
+    job.update(state='cancelled',reason='Inventory or mappings changed. Start a new collection.')
+if tutorial_active(): stop_collection(job)
+busy=bool(job and job['state']=='running')
+with st.expander('Advanced: collect a subset'):
+    assessment_scope=st.multiselect('Repositories for assessment',repos,default=repos,
+        key='assessment_scope_'+context,help='Optional subset; the main collection button always includes every mapped repository.')
+    st.button('Collect selected repositories',key='collect_subset',disabled=not assessment_scope or busy,
+        on_click=request_assessment_collection,args=(assessment_scope,))
 action_left,action_right=st.columns(2)
-action_left.button('Collect assessment evidence',key='collect_assessment',type='primary',disabled=not assessment_scope,on_click=request_assessment_collection,args=(assessment_scope,),help='Collect repository metadata, available branch settings, and contributors using your GitHub connection. Previously collected observations are reused. No Tavily searches run.')
-action_right.button('Retry missing evidence',key='retry_assessment',disabled=not assessment_scope,on_click=request_assessment_retry,args=(assessment_scope,),help='Retry selected repositories with failed or partial collection, for example after replacing an expired token. Repositories without failures use cached observations.')
+action_left.button('Collect all GitHub evidence',key='collect_assessment',type='primary',disabled=not repos or busy,
+    on_click=request_assessment_collection,args=(repos,),help='Collect all mapped repositories once, reusing session observations. No Tavily searches run.')
+action_right.button('Retry missing evidence',key='retry_assessment',disabled=not repos or busy,
+    on_click=request_assessment_retry,args=(repos,),help='Retry partial or failed collection across the entire mapped inventory.')
 if not repos:
-    st.info('Collection is unavailable because this inventory has no GitHub repository mappings. Click Auto-map all components under Inventory & repository mapping. Mission inputs, local control drafting, and reports can still be used without a mapping.')
-elif not assessment_scope:
-    st.info('Select at least one repository in Repositories for assessment to enable collection. Your evidence-mode setting does not block this action.')
-else:
-    st.caption(f'Ready to collect {len(assessment_scope)} repository mapping(s) using Live GitHub. Current evidence mode: {mode}.')
-collection_requested=st.session_state.pop('collect_assessment_requested',False)
-collection_retry=st.session_state.pop('retry_assessment_requested',False)
-if collection_requested:
-    requested_repos=st.session_state.pop('assessment_requested_repos',assessment_scope)
-    progress=st.progress(0,text='Collecting assessment evidence')
-    count=collect_inventory(components,evidence,requested_repos,token,use_scorecard,retry=collection_retry,
-        progress=lambda i,n,r:progress.progress(i/n,text=f'GitHub {i}/{n}: {r}'))
-    progress.empty()
-    available=sum(bool(evidence[c['id']].get('factors')) for c in components if c['repo'] in requested_repos)
-    if available:
-        st.success(f'Collection finished: {available:,} component(s) have observations. Queried {count} repositories; reused session evidence where available. Review evidence coverage below.')
-    else:
-        st.error('No scored observations returned. Review Evidence for HTTP errors, check repository mappings and your token, then use Retry missing evidence.')
+    st.info('Collection is unavailable because this inventory has no GitHub repository mappings. Click Auto-map all components first.')
+st.caption(f'{len(repos):,} unique mapped repositories · {unmapped:,} unmapped components. Collection uses GitHub only. Missing evidence stays unknown.')
+if st.session_state.pop('collect_assessment_requested',False):
+    targets=[repo for repo in st.session_state.pop('assessment_requested_repos',repos) if repo in repos]
+    st.session_state.collection_job=new_collection(components,evidence,targets,retry=st.session_state.pop('retry_assessment_requested',False))
+    job=st.session_state.collection_job
+
+@st.fragment(run_every=1 if job and job['state'] in ('running','paused') else None)
+def collection_panel():
+    job=st.session_state.get('collection_job')
+    if not job: return
+    left_stop,right_resume=st.columns(2)
+    def resume_job():
+        enable_live_mode()
+        resume_collection(job,components)
+    stopped=left_stop.button('Stop collection',key='stop_collection',disabled=job['state']!='running',
+        on_click=stop_collection,args=(job,))
+    resumed=right_resume.button('Resume collection',key='resume_collection',disabled=job['state']!='paused' or time.time()<job.get('resume_at',0),
+        on_click=resume_job)
+    if stopped or resumed: st.rerun()
+    state_before=job['state']
+    if job['state']=='running' and st.session_state.view=='assessment' and not tutorial_active():
+        step_collection(job,components,evidence,token,use_scorecard)
+    counts=collection_counts(job)
+    total=len(job['repositories'])
+    st.progress((job['cursor']+len(job['cached']))/max(1,total),text=f"GitHub collection: {job['cursor']+len(job['cached'])} / {total} repositories")
+    st.caption(' · '.join(f'{key.title()}: {value}' for key,value in counts.items()))
+    if job['reason']: st.info(job['reason'])
+    if job['state']=='paused' and job.get('resume_at',0)>time.time():
+        st.caption('Resume available after '+datetime.fromtimestamp(job['resume_at']).astimezone().strftime('%Y-%m-%d %H:%M:%S %Z'))
+    if job['state']=='complete': st.success('GitHub collection complete. Review coverage and any missing evidence below.')
+    if state_before=='running' and job['state']!='running': st.rerun()
+collection_panel()
 st.subheader('Research',help='Review the mappings before selecting repositories. GitHub supplies governance observations; Tavily finds public contributor sources. Research never starts on upload or rerender.')
 coach('research')
 research_requested=st.session_state.get('research_requested')
@@ -353,6 +410,27 @@ if research_requested:
 if st.session_state.research_cache:
     st.dataframe([{'Repository':r['repository'],'Status':r['status'],'Searches':r.get('searches_attempted',0),'Retrieved':r.get('retrieved_at')} for r in st.session_state.research_cache.values()],hide_index=True,width='stretch')
 st.subheader('Assessment')
+coach('mission_assignment')
+with st.container(border=True):
+    st.markdown('**Assign mission inputs across the inventory**',help='Dependency reach is a heuristic based on recorded direct and transitive dependents, not measured deployment. Criticality and recovery remain your judgment.')
+    shared=st.columns(3)
+    bulk_c=shared[0].number_input('Shared criticality',1,5,3,key='shared_criticality_'+context)
+    bulk_r=shared[1].number_input('Shared recovery difficulty',1,5,3,key='shared_recovery_'+context)
+    bulk_f=shared[2].number_input('Fallback reach',1,5,3,key='shared_fallback_'+context)
+    replace=st.checkbox('Replace manual overrides',key='replace_mission_overrides')
+    assign_col,undo_col=st.columns(2)
+    def sync_mission_widgets():
+        for ref,saved in st.session_state.assessments.items():
+            for index,suffix in enumerate('abd'): st.session_state[context+ref+suffix]=saved['inputs'][index]
+    def bulk_assign():
+        st.session_state.mission_undo=assign_mission(components,st.session_state.assessments,int(bulk_c),int(bulk_r),int(bulk_f),replace)
+        sync_mission_widgets()
+    def bulk_undo():
+        undo_mission(st.session_state.assessments,st.session_state.pop('mission_undo'))
+        sync_mission_widgets()
+    assign_col.button('Auto-assign mission impact',key='auto_mission',on_click=bulk_assign,type='primary')
+    undo_col.button('Undo last bulk assignment',key='undo_mission',on_click=bulk_undo,disabled='mission_undo' not in st.session_state)
+    st.caption('Dependent counts 0–1 / 2–4 / 5–9 / 10–24 / 25+ map to reach 1 / 2 / 3 / 4 / 5. Missing graphs use fallback reach. Manual overrides are preserved unless replaced.')
 coach('component')
 labels={c['id']:c['name']+' · '+c['version']+' ['+c['id']+']' for c in components}
 # Consume selection before rendering the selector on the next rerun.
@@ -372,20 +450,22 @@ if mode=='Live GitHub' or upload:
 left,right=st.columns([1.35,1])
 with right:
     st.subheader('Mission & response', help='Set the consequences of this component failing or being compromised. Each input uses a 1–5 scale; higher means greater impact. Defaults are 3 and should be reviewed.')
-    st.caption('Mission impact is your operational judgment, not a value extracted from the SBOM. Starting inputs of 3/5 each produce 60; set each scale for this component.')
+    dependency=c.get('dependency',{})
+    count=dependency.get('dependent_count')
+    st.caption(f'Dependency graph: {count} direct/transitive dependent component(s).' if count is not None else 'Graph unavailable: shared fallback reach is used by auto-assignment.')
     saved=st.session_state.assessments.get(selected, {'inputs':[3,3,3], 'controls':[]})
+    def mission_changed(index,suffix):
+        saved=st.session_state.assessments[selected]
+        saved['inputs'][index]=st.session_state[context+selected+suffix]
+        saved['input_sources'][index]='manual'
     coach('criticality')
-    a=st.slider('Operational criticality',1,5,saved['inputs'][0],key=context+selected+'a', help='How essential is this component to the operation? 1: optional convenience. 2: minor degradation. 3: important function degraded. 4: core operation disrupted. 5: mission cannot continue.')
+    a=st.slider('Operational criticality',1,5,saved['inputs'][0],key=context+selected+'a',on_change=mission_changed,args=(0,'a'), help='How essential is this component to the operation? 1: optional convenience. 2: minor degradation. 3: important function degraded. 4: core operation disrupted. 5: mission cannot continue.')
     coach('reach')
-    b=st.slider('Deployment reach / blast radius',1,5,saved['inputs'][1],key=context+selected+'b', help='How widely would a failure or compromise spread? 1: isolated test or single user. 2: one small service. 3: several services or one team. 4: multiple teams or production systems. 5: organization-wide or critical shared infrastructure.')
+    b=st.slider('Deployment reach / blast radius',1,5,saved['inputs'][1],key=context+selected+'b',on_change=mission_changed,args=(1,'b'), help='How widely would a failure or compromise spread? 1: isolated test or single user. 2: one small service. 3: several services or one team. 4: multiple teams or production systems. 5: organization-wide or critical shared infrastructure.')
     coach('recovery')
-    d=st.slider('Recovery difficulty',1,5,saved['inputs'][2],key=context+selected+'d', help='How difficult would restoration or replacement be? 1: immediate rollback, negligible disruption. 2: routine recovery within hours. 3: coordinated work over days. 4: major rebuild or migration over weeks. 5: no practical replacement or prolonged loss of capability.')
-    coach('controls')
-    controls=st.multiselect('Model mitigation controls',list(CONTROLS),format_func=lambda k:CONTROLS[k][0],default=saved['controls'],key=context+selected+'controls', help='What-if controls for this component. They reduce selected drivers using illustrative assumptions; they do not change upstream settings or establish implementation, compliance, or effectiveness.')
-    for key in controls:
-        title,control,factor,effect=CONTROLS[key]
-        st.markdown(f'**{control}** · {int(effect*100)}% assumed reduction in {factor} driver. [Baseline guidance]({BASELINE})')
-st.session_state.assessments[selected]={'inputs':[a,b,d], 'controls':controls}
+    d=st.slider('Recovery difficulty',1,5,saved['inputs'][2],key=context+selected+'d',on_change=mission_changed,args=(2,'d'), help='How difficult would restoration or replacement be? 1: immediate rollback, negligible disruption. 2: routine recovery within hours. 3: coordinated work over days. 4: major rebuild or migration over weeks. 5: no practical replacement or prolonged loss of capability.')
+    st.caption('Input sources: '+', '.join(saved['input_sources']))
+st.session_state.assessments[selected]['inputs']=[a,b,d]
 results={}
 for item in components:
     ref=item['id']; prefix=context+ref
@@ -393,20 +473,11 @@ for item in components:
     results[ref]=score(evidence[ref], saved['inputs'], saved['controls'])
 s=results[selected]
 with st.expander('Component assessment status',expanded=bool(upload)):
-    st.dataframe([{'Component':item['name'],'GitHub repository':item['repo'] or 'Unmapped','Collection status':collection_status(evidence[item['id']],item['repo']),'Impact':results[item['id']]['impact'],'Exposure':display_score(results[item['id']]['exposure']),'Modeled residual':display_score(results[item['id']]['residual']),'Coverage':str(results[item['id']]['completeness'])+'%'} for item in components],hide_index=True,width='stretch')
+    st.dataframe([{'Component':item['name'],'GitHub repository':item['repo'] or 'Unmapped','Collection status':collection_status(evidence[item['id']],item['repo']),'Dependents':item.get('dependency',{}).get('dependent_count'),'Reach source':st.session_state.assessments[item['id']]['input_sources'][1],'Impact':results[item['id']]['impact'],'Exposure':display_score(results[item['id']]['exposure']),'Modeled residual':display_score(results[item['id']]['residual']),'Coverage':str(results[item['id']]['completeness'])+'%'} for item in components],hide_index=True,width='stretch')
 with left:
     coach('matrix')
-    st.subheader('Mission exposure matrix', help='Click a point to inspect a component. Horizontal: mission impact, 20–100. Vertical: observed governance/contributor exposure, 0–100. Circles show baseline; diamonds show modeled residual. Point size shows evidence completeness. Quadrant dividers at 50 are visual guides, not acceptance thresholds.')
-    fig=go.Figure()
-    for x0,x1,y0,y1,color in [(0,50,0,50,'#202b28'),(50,100,0,50,'#302d25'),(0,50,50,100,'#30282b'),(50,100,50,100,'#47282b')]:
-        fig.add_shape(type='rect',x0=x0,x1=x1,y0=y0,y1=y1,fillcolor=color,line_width=0,layer='below',opacity=.65)
-    for item in components:
-        v=results[item['id']]
-        if v['exposure'] is None: continue
-        fig.add_trace(go.Scatter(x=[v['impact'],v['impact']],y=[v['exposure'],v['residual']],mode='lines',line=dict(color='#777b80',width=1),showlegend=False,hoverinfo='skip'))
-        for residual,symbol,color in [(False,'circle','#b4b7bc'),(True,'diamond','#cf454a')]:
-            fig.add_trace(go.Scatter(x=[v['impact']],y=[v['residual'] if residual else v['exposure']],mode='markers',customdata=[item['id']],name=item['name']+(' modeled' if residual else ' baseline'),marker=dict(size=12+v['completeness']/7,symbol=symbol,color=color,line=dict(color='#ffffff' if item['id']==selected else color,width=2)),hovertemplate='%{text}<br>Mission impact %{x}<br>Exposure %{y}<extra></extra>',text=[item['name']+f" · {v['completeness']}% complete"],showlegend=False))
-    fig.update_layout(height=450,margin=dict(l=15,r=15,t=15,b=15),paper_bgcolor='#0b0d0f',plot_bgcolor='#0b0d0f',font=dict(color='#e5e6e8',family='Arial, sans-serif'),xaxis=dict(title='MISSION IMPACT →',range=[-3,103],gridcolor='#35383c'),yaxis=dict(title='CONTRIBUTOR / GOVERNANCE EXPOSURE →',range=[-3,103],gridcolor='#35383c'),clickmode='event+select')
+    st.subheader('Mission exposure matrix', help='Click a point to inspect a component. Horizontal: mission impact; vertical: observed exposure. Red circles show before controls, green diamonds show modeled after controls. Unknowns are omitted. Controls are selected below the assessment.')
+    fig=matrix_figure({'components':[{**item,'assessment':results[item['id']]} for item in components]},selected)
     def choose_point():
         points=st.session_state['matrix'+context]['selection']['points']
         if points:
@@ -422,44 +493,103 @@ for col,label,value in zip(cols,['Mission impact','Observed exposure','Modeled r
     col.metric(label,'Unknown' if value is None else value, help=metric_help[label])
 if s['completeness']<60: st.warning('Limited evidence. A low observed score cannot establish low overall exposure; prioritize verification.')
 if s['exposure'] is None:
-    if not c['repo']: st.info('This component needs a verified GitHub repository mapping. Add one in Inventory & repository mapping, then collect assessment evidence.')
-    elif evidence[selected].get('mode')=='unknown': st.info('No assessment evidence collected for this component yet. Include its repository in Repositories for assessment and click Collect assessment evidence.')
+    if not c['repo']: st.info('This component needs a verified GitHub repository mapping. Add one in Inventory & repository mapping, then click Collect all GitHub evidence.')
+    elif evidence[selected].get('mode')=='unknown': st.info('No assessment evidence collected for this component yet. Click Collect all GitHub evidence to collect observations for every mapped repository.')
     else: st.error('Collection returned no scored observations for this component. Review the errors in Evidence and use Retry missing evidence after correcting the cause.')
-st.subheader('Control measures',help='Use your local LLM to draft actions and verification steps for the selected component. Generated text is unverified and has no automatic effect on scores or evidence coverage.')
+st.subheader('Control measures',help='Select the actions you want in the implementation plan. Only checked controls appear in the PDF. Built-in controls have illustrative modeled effects; generated proposals have no automatic score effect.')
+coach('controls')
+saved=st.session_state.assessments[selected]
+draft=st.session_state.get('control_drafts',{}).get(selected)
+current_context=control_context(c,evidence[selected],s,st.session_state.get('control_contexts',{}).get(selected,''))
+if draft: invalidate_draft(draft,draft['context_fingerprint']!=context_fingerprint(current_context))
+def builtin_changed(key,widget):
+    chosen=st.session_state.assessments[selected]['controls']
+    if st.session_state[widget] and key not in chosen: chosen.append(key)
+    elif not st.session_state[widget] and key in chosen: chosen.remove(key)
+def choose_all_controls(value):
+    st.session_state.assessments[selected]['controls']=list(CONTROLS) if value else []
+    for key in CONTROLS: st.session_state.pop('builtin_'+context+selected+key,None)
+    if draft and not draft.get('stale'):
+        for card in prepare_draft(draft):
+            card['selected']=value and selectable(card)
+            st.session_state.pop('proposal_'+context+selected+draft['generation_id']+card['selection_id'],None)
+        draft['reviewed']=any(card.get('selected') for card in prepare_draft(draft))
+select_all,clear_all=st.columns(2)
+select_all.button('Select all controls',key='select_all_controls',on_click=choose_all_controls,args=(True,))
+clear_all.button('Clear selection',key='clear_controls',on_click=choose_all_controls,args=(False,))
+for key,(title,baseline,factor,effect) in CONTROLS.items():
+    widget='builtin_'+context+selected+key
+    # Push durable selection state back to the browser after hidden-page cleanup.
+    st.session_state[widget]=key in saved['controls']
+    st.checkbox(title,key=widget,on_change=builtin_changed,args=(key,widget),
+        help=f'Include this control in the implementation plan. Assumed {effect:.0%} reduction of the {factor} driver; no reduction when that evidence is unknown. {baseline}. This does not implement or verify a safeguard.')
 coach('local_controls')
-st.caption('Generate proposals with your chosen local model. Review each measure before use. To simulate score reductions, use Model mitigation controls above; generated proposals do not change scores.')
-operational_context=st.text_area('Operational context for controls (optional)',value=st.session_state.get('control_contexts',{}).get(selected,''),max_chars=2000,key='control_context_'+context+selected,help='Describe constraints, deployment, ownership, or recovery options that should shape the proposals. Only this selected component\'s assessment and this text are sent to the local endpoint; credentials and the full SBOM are excluded.')
+st.caption('Generate proposals with your local model, then check individual actions to include them. Generated actions do not change scores.')
+operational_context=st.text_area('Operational context for controls (optional)',value=st.session_state.get('control_contexts',{}).get(selected,''),max_chars=2000,key='control_context_'+context+selected,help='Only this component’s assessment and operational context are sent to your configured local endpoint; credentials and the full SBOM are excluded.')
 st.session_state.setdefault('control_contexts',{})[selected]=operational_context
 draft_context=control_context(c,evidence[selected],s,operational_context)
-with st.expander('Context sent to the local model'):
-    st.json(draft_context)
-if not llm_can_generate: st.caption('Open Local LLM connection in the sidebar. Connect and select a model, or supply a model ID manually, to enable generation.')
+with st.expander('Context sent to the local model'): st.json(draft_context)
+if not llm_can_generate: st.caption('Connect a local model in the sidebar or supply its model ID to enable generation.')
 if st.button('Generate control measures',key='generate_controls',disabled=not llm_can_generate,type='primary'):
     with st.spinner(f'Generating controls with {llm_model}; this can take up to {llm_timeout} seconds…'):
         try:
             draft=generate_controls(llm_provider,llm_endpoint,llm_model,draft_context,llm_key,int(llm_timeout),secrets=(token,tavily_key,project_id),structured=llm_structured)
+            prepare_draft(draft)
+            previous=st.session_state.get('control_drafts',{}).get(selected)
+            if previous:
+                st.session_state.setdefault('control_draft_history',{}).setdefault(selected,[]).append(deepcopy(previous))
             st.session_state.setdefault('control_drafts',{})[selected]=draft
         except ValueError as exc: st.error(str(exc))
 draft=st.session_state.get('control_drafts',{}).get(selected)
 if draft:
     stale=draft['context_fingerprint']!=context_fingerprint(draft_context)
-    if stale: st.warning('The assessment or operational context changed after generation. These measures are out of date; regenerate them before relying on them.')
-    st.caption(f"Unverified model draft · {draft['provider']} · {draft['model']} · {draft['generated_at']}")
+    cards=invalidate_draft(draft,stale)
+    stale=draft['stale']
+    if stale: st.warning('These measures are out of date. Their report selections have been cleared; regenerate and review the new proposals.')
+    st.caption(f"Unverified proposals · {draft['provider']} · {draft['model']} · {draft['generated_at']}")
     if draft.get('text'):
-        st.info('This model returned an unstructured draft. Review its text directly; no control fields or score reductions have been inferred from it.')
-        st.text(draft['text'])
-    for measure in draft['controls']:
+        with st.expander('Original plain-text draft'): st.text(draft['text'])
+        st.caption('Review the extracted action cards, or add an action from the draft. Editing a card clears its selection.')
+        with st.form('add_action_'+context+selected+draft['generation_id']):
+            action_title=st.text_input('New action title',max_chars=160)
+            action_text=st.text_area('New action text',max_chars=4000)
+            add_action=st.form_submit_button('Add action card',disabled=stale)
+        if add_action:
+            if action_title.strip() and action_text.strip():
+                draft['action_cards'].append({'title':action_title.strip(),'actions':[action_text.strip()],'editable':True})
+                prepare_draft(draft)
+                st.rerun()
+            else: st.error('Enter a title and action text.')
+    def proposal_changed(card,widget):
+        card['selected']=st.session_state[widget]
+        draft['reviewed']=any(item.get('selected') for item in prepare_draft(draft))
+    def edit_card(card,title_key,text_key,select_key):
+        title=st.session_state[title_key].strip()
+        action=st.session_state[text_key].strip()
+        card.update(title=title,actions=[action],selected=False)
+        st.session_state[select_key]=False
+    for measure in cards:
+        widget='proposal_'+context+selected+draft['generation_id']+measure['selection_id']
+        st.session_state[widget]=bool(measure.get('selected')) and not stale
         with st.container(border=True):
-            st.text(f"{measure['id']}. {measure['title']}")
-            st.caption('Proposed implementation priority: '+measure['priority'])
-            st.text(measure['rationale'])
-            for step in measure['actions']: st.text('• '+step)
-            st.text('Verify completion: '+measure['verification'])
-            for source in measure['source_urls']: st.link_button('Supplied assessment source',source)
-    review_key='controls_reviewed_'+context+selected+draft['generated_at']
-    reviewed=st.checkbox('I have reviewed these proposed control measures',value=draft.get('reviewed',False),key=review_key,disabled=stale,help='Records your review in exports. It does not prove implementation or effectiveness, and does not change scoring.')
-    draft['reviewed']=reviewed and not stale
-    st.caption('Included in PDF and JSON reports with model provenance, review status, and an out-of-date flag when applicable.')
+            check,title_col=st.columns([2,3])
+            check.checkbox('Include in implementation plan',key=widget,disabled=stale or not selectable(measure),on_change=proposal_changed,args=(measure,widget),help='Check after reviewing this action. Includes this proposal for this component in the PDF; it does not prove implementation or change the score.')
+            title_col.text(measure['title'])
+            if measure.get('editable'):
+                title_key=widget+'_title';text_key=widget+'_text'
+                if title_key not in st.session_state: st.session_state[title_key]=measure['title']
+                if text_key not in st.session_state: st.session_state[text_key]='\n'.join(measure['actions'])
+                st.text_input('Action title',key=title_key,disabled=stale,max_chars=160,on_change=edit_card,args=(measure,title_key,text_key,widget))
+                st.text_area('Action text',key=text_key,disabled=stale,max_chars=4000,on_change=edit_card,args=(measure,title_key,text_key,widget))
+            else:
+                for action in measure.get('actions',[]): st.text('• '+action)
+                with st.expander('Reason and verification'):
+                    st.text(measure.get('rationale',''))
+                    st.text(measure.get('verification',''))
+                    for source in measure.get('source_urls',[]): st.link_button('Supplied assessment source',source)
+    draft['reviewed']=any(card.get('selected') for card in cards) and not stale
+selected_count=len(saved['controls'])+sum(card.get('selected',False) for card in prepare_draft(draft) if not draft.get('stale')) if draft else len(saved['controls'])
+st.caption(f'{selected_count} control(s) selected for this component. Only checked, current actions appear in the report; JSON retains all drafts and selection status.')
 coach('evidence')
 t1,t2,t3=st.tabs(['Evidence','Method','Export'])
 with t1:
@@ -508,5 +638,7 @@ The 50-point quadrant boundaries are navigation aids, not validated acceptance t
 with t3:
     st.write('Finish the assessment to review all components and download a PDF report and JSON evidence sidecar. Missing observations remain unknown.')
 coach('finish')
-def finish_assessment(): st.session_state.view='report'
+def finish_assessment():
+    stop_collection(st.session_state.get('collection_job'))
+    st.session_state.view='report'
 st.button('Finish assessment',key='finish_assessment',type='primary',on_click=finish_assessment)

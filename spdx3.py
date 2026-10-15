@@ -8,15 +8,17 @@ import re
 TERMS = re.compile(r'^https://spdx\.org/rdf/3(?:\.\d+){0,2}/terms/(Core|Software)/([^/#]+)$')
 SOFTWARE = {'Package', 'packageVersion', 'packageUrl', 'downloadLocation', 'homePage'}
 CORE = {'SpdxDocument', 'CreationInfo', 'ExternalRef', 'ExternalIdentifier', 'name',
-        'externalRef', 'externalIdentifier', 'locator', 'identifier', 'identifierLocator'}
+        'externalRef', 'externalIdentifier', 'locator', 'identifier', 'identifierLocator',
+        'Relationship', 'relationshipType', 'from', 'to', 'completeness', 'rootElement',
+        'dependsOn', 'hasOptionalDependency', 'hasProvidedDependency'}
 
 
 def _list(value):
     return value if isinstance(value, list) else [value]
 
 
-def parse_graph(data, repository):
-    """Normalize package nodes into the application's existing component interface."""
+def graph_nodes(data):
+    """Resolve local JSON-LD terms and split nodes without fetching contexts."""
     context = data.get('@context', []) if isinstance(data, dict) else []
     aliases = {}
     vocab = None
@@ -97,6 +99,12 @@ def parse_graph(data, repository):
             for value in values:
                 if value not in retained: retained.append(value)
     index={key[1]:node for key,node in nodes.items() if key[0]=='id'}
+    return nodes,index,warnings,term,literals,normalize,expand
+
+
+def parse_graph(data, repository):
+    """Normalize package nodes into the existing component interface."""
+    nodes,index,warnings,term,literals,normalize,expand=graph_nodes(data)
     out=[]
     used={key[1] for key in nodes if key[0]=='id'}
     for key, node in nodes.items():

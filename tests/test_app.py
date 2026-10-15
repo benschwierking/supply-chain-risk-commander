@@ -5,7 +5,7 @@ from io import BytesIO
 from pathlib import Path
 
 def load(): return AppTest.from_file('app.py',default_timeout=30).run()
-def controls(app): return next(m for m in app.multiselect if m.label=='Model mitigation controls')
+def controls(app): return next(m for m in app.checkbox if m.label=='Independent human review')
 
 def test_scenario_controls_and_component_persistence():
     app=load()
@@ -14,12 +14,12 @@ def test_scenario_controls_and_component_persistence():
     assert app.button(key='apply_mappings').disabled
     assert any('Viewing the bundled CycloneDX sample (6 components)' in item.value for item in app.info)
     assert any('No mapping needed' in item.value for item in app.caption)
-    controls(app).select('review').run()
+    controls(app).check().run()
     assert app.metric[2].value=='65.2'
     app.slider[0].set_value(5).run()
     app.selectbox(key='component_choice').set_value('urllib3').run()
     app.selectbox(key='component_choice').set_value('requests').run()
-    assert app.slider[0].value==5 and controls(app).value==['review']
+    assert app.slider[0].value==5 and controls(app).value is True
     app.radio[0].set_value('Live GitHub').run()
     assert not app.exception and app.metric[1].value=='Unknown'
     assert app.button(key='auto_map_all').disabled
@@ -27,18 +27,19 @@ def test_scenario_controls_and_component_persistence():
 def test_help_report_navigation_preserves_assessment():
     app=load()
     app.slider[0].set_value(5).run()
-    controls(app).select('review').run()
+    controls(app).check().run()
     app.button(key='readme_nav').click().run()
     assert not app.exception
     assert any('Quick start' in m.value for m in app.markdown)
     assert not any(m.value.startswith('# HEPHAESTUS') for m in app.markdown)
     app.button(key='back_assessment').click().run()
-    assert app.slider[0].value==5 and controls(app).value==['review']
+    assert app.slider[0].value==5 and controls(app).value is True
+    assert controls(app).proto.set_value and controls(app).proto.value
     app.button(key='finish_assessment').click().run()
     assert app.session_state.view=='report' and not app.exception
     assert len(app.get('download_button'))==2
     app.button(key='back_assessment').click().run()
-    assert app.slider[0].value==5
+    assert app.slider[0].value==5 and controls(app).value is True
     app.button(key='sidebar_toggle').click().run()
     assert not app.session_state.sidebar_open
     app.button(key='sidebar_toggle').click().run()
@@ -177,11 +178,11 @@ def test_uploaded_assessment_collects_without_tavily_and_preserves_inputs(monkey
     assert not app.exception and calls==[]
     assert app.metric[1].value=='Unknown' and app.metric[3].value=='0%'
     app.slider[0].set_value(5).run()
-    controls(app).select('review').run()
+    controls(app).check().run()
     app.button(key='collect_assessment').click().run()
     assert not app.exception and calls==['owner/shared']
     assert app.radio[0].value=='Live GitHub'
-    assert app.slider[0].value==5 and controls(app).value==['review']
+    assert app.slider[0].value==5 and controls(app).value is True
     assert app.metric[0].value=='73.3' and app.metric[1].value=='70.0'
     assert app.metric[2].value=='46.8' and app.metric[3].value=='70%'
     app.selectbox(key='component_choice').set_value('two').run()
@@ -312,7 +313,7 @@ def test_local_control_generation_review_staleness_and_report(monkeypatch):
     assert not app.exception and [metric.value for metric in app.metric]==before
     assert len(calls)==2 and calls[1][0]=='POST'
     assert app.session_state.control_drafts['requests']['model']=='gpt-oss:20b'
-    review=next(box for box in app.checkbox if box.label=='I have reviewed these proposed control measures')
+    review=next(box for box in app.checkbox if box.label=='Include in implementation plan')
     review.check().run()
     assert app.session_state.control_drafts['requests']['reviewed']
     app.button(key='readme_nav').click().run()
@@ -320,9 +321,9 @@ def test_local_control_generation_review_staleness_and_report(monkeypatch):
     assert app.text_area[0].value=='Recover within one business day.' and len(calls)==2
     app.slider[0].set_value(5).run()
     assert any('out of date' in warning.value for warning in app.warning)
-    assert next(box for box in app.checkbox if box.label=='I have reviewed these proposed control measures').disabled
+    assert next(box for box in app.checkbox if box.label=='Include in implementation plan').disabled
     app.button(key='finish_assessment').click().run()
-    assert not app.exception and captured[-1]['schema'].endswith('/1.2')
+    assert not app.exception and captured[-1]['schema'].endswith('/1.3')
     draft=captured[-1]['generated_control_measures']['requests']
     assert draft['stale'] and not draft['reviewed'] and len(draft['controls'])==1
     assert captured[-1]['components'][0]['assessment']['exposure']==81.4
@@ -363,3 +364,106 @@ def test_manual_model_id_works_without_model_discovery(monkeypatch):
     assert calls[-1][2]['model']=='custom-model-identifier'
     draft=app.session_state.control_drafts['requests']
     assert draft['format']=='text' and 'rollback' in draft['text']
+
+
+def test_bulk_mission_assignment_overrides_undo_and_single_control_area(monkeypatch):
+    data={'bomFormat':'CycloneDX','components':[{'name':x,'bom-ref':x} for x in 'abc'],
+          'dependencies':[{'ref':'a','dependsOn':['b']},{'ref':'b','dependsOn':['c']}]}
+    monkeypatch.setattr('streamlit.file_uploader',lambda *a,**k:BytesIO(json.dumps(data).encode()))
+    app=load()
+    assert not app.exception
+    assert not any(m.label=='Model mitigation controls' for m in app.multiselect)
+    app.slider[0].set_value(5).run()
+    next(n for n in app.number_input if n.label=='Shared criticality').set_value(2).run()
+    next(n for n in app.number_input if n.label=='Shared recovery difficulty').set_value(4).run()
+    app.button(key='auto_mission').click().run()
+    assert not app.exception and app.session_state.assessments['a']['inputs']==[5,1,4]
+    assert app.session_state.assessments['c']['inputs']==[2,2,4]
+    controls(app).check().run()
+    app.button(key='undo_mission').click().run()
+    assert app.session_state.assessments['a']['inputs']==[5,3,3] and controls(app).value
+    app.checkbox(key='replace_mission_overrides').check().run()
+    app.button(key='auto_mission').click().run()
+    assert app.session_state.assessments['a']['inputs']==[2,1,4]
+
+
+def test_individual_control_choices_clear_regenerate_and_report(monkeypatch):
+    from tests.test_local_llm import proposals
+    from control_plan import selected_plan
+    generated=proposals()
+    generated['controls'].append({**generated['controls'][0],'title':'Second proposal'})
+    monkeypatch.setattr('local_llm._request',lambda method,*a,**k:{'models':[{'name':'any'}]} if method=='GET' else {'message':{'content':json.dumps(generated)}})
+    captured=[]
+    monkeypatch.setattr('reporting.pdf_report',lambda payload:captured.append(payload) or b'%PDF-test')
+    app=load();app.button(key='connect_local_llm').click().run();app.button(key='generate_controls').click().run()
+    boxes=[b for b in app.checkbox if b.label=='Include in implementation plan']
+    assert len(boxes)==2 and not any(b.value for b in boxes)
+    boxes[1].check().run()
+    app.selectbox(key='component_choice').set_value('urllib3').run()
+    app.selectbox(key='component_choice').set_value('requests').run()
+    boxes=[b for b in app.checkbox if b.label=='Include in implementation plan']
+    assert [b.value for b in boxes]==[False,True]
+    app.button(key='finish_assessment').click().run()
+    assert [p['control'] for p in selected_plan(captured[-1])]==['Second proposal']
+    app.button(key='back_assessment').click().run()
+    app.button(key='select_all_controls').click().run()
+    assert all(b.value for b in app.checkbox if b.label=='Include in implementation plan')
+    assert all(b.proto.set_value and b.proto.value for b in app.checkbox if b.label=='Include in implementation plan')
+    assert len(app.session_state.assessments['requests']['controls'])==3
+    app.button(key='clear_controls').click().run()
+    assert not any(b.value for b in app.checkbox if b.label=='Include in implementation plan')
+    boxes=[b for b in app.checkbox if b.label=='Include in implementation plan']
+    boxes[0].check().run()
+    first_generation=app.session_state.control_drafts['requests']['generation_id']
+    app.button(key='generate_controls').click().run()
+    assert not any(b.value for b in app.checkbox if b.label=='Include in implementation plan')
+    history=app.session_state.control_draft_history['requests']
+    assert len(history)==1 and history[0]['generation_id']==first_generation and history[0]['controls'][0]['selected']
+    app.button(key='finish_assessment').click().run()
+    assert captured[-1]['generated_control_history']['requests']==history
+    assert selected_plan(captured[-1])==[]
+
+
+def test_plain_text_editable_control_cards(monkeypatch):
+    monkeypatch.setattr('local_llm._request',lambda method,*a,**k:{'models':[{'name':'any'}]} if method=='GET' else {'message':{'content':'1. Test rollback\n2. Verify reviews'}})
+    app=load();app.button(key='connect_local_llm').click().run();app.button(key='generate_controls').click().run()
+    assert not app.exception
+    boxes=[b for b in app.checkbox if b.label=='Include in implementation plan'];boxes[0].check().run()
+    text=next(t for t in app.text_area if t.label=='Action text')
+    text.set_value('Test a staged rollback.').run()
+    assert not app.exception
+    assert not next(b for b in app.checkbox if b.label=='Include in implementation plan').value
+    assert app.session_state.control_drafts['requests']['action_cards'][0]['actions']==['Test a staged rollback.']
+    next(t for t in app.text_area if t.label=='Action text').set_value('').run()
+    app.button(key='select_all_controls').click().run()
+    boxes=[b for b in app.checkbox if b.label=='Include in implementation plan']
+    assert boxes[0].disabled and not boxes[0].value and boxes[1].value
+
+
+def test_sample_controls_survive_collection_and_report(monkeypatch):
+    monkeypatch.setattr('evidence.collect',lambda *a,**k:{'mode':'live GitHub REST','factors':{'review':1},'sources':[]})
+    app=load();controls(app).check().run()
+    app.button(key='finish_assessment').click().run()
+    app.button(key='back_assessment').click().run()
+    assert controls(app).value and app.session_state.assessments['requests']['controls']==['review']
+    app.button(key='collect_assessment').click().run()
+    while app.session_state.collection_job['state']=='running': app.run()
+    assert not app.exception and controls(app).value
+    assert app.session_state.assessments['requests']['controls']==['review']
+
+
+def test_all_collection_pause_resume_and_no_network_on_idle_rerender(monkeypatch):
+    calls=[]
+    monkeypatch.setattr('evidence.collect',lambda repo,*a:calls.append(repo) or {'mode':'live GitHub REST','factors':{'archived':0},'sources':[]})
+    app=uploaded_app(monkeypatch,[{'name':str(i),'purl':f'pkg:github/o/r{i}@1'} for i in range(30)])
+    assert len(next(m for m in app.multiselect if m.label=='Repositories for assessment').value)==30
+    assert calls==[]
+    app.button(key='collect_assessment').click().run()
+    assert len(calls)==1
+    app.button(key='stop_collection').click().run()
+    count=len(calls);app.run()
+    assert len(calls)==count and app.session_state.collection_job['state']=='paused'
+    app.button(key='resume_collection').click().run()
+    while app.session_state.collection_job['state']=='running': app.run()
+    assert len(calls)==30 and len(set(calls))==30
+    app.run();assert len(calls)==30

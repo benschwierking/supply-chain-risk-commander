@@ -1,103 +1,147 @@
-"""Printable, provenance-aware assessment report. No network calls."""
+"""Compact, deterministic decision report. Full provenance remains in the sidecar."""
 from io import BytesIO
 from html import escape
 from urllib.parse import urlparse
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether, CondPageBreak
-from core import CONTROLS
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, CondPageBreak
+from reportlab.graphics.shapes import Drawing, Line, Circle, Polygon, String
+from control_plan import priorities, priority_value, justification, selected_plan
+
+RED = '#bc2835'
+GREEN = '#14804a'
+
+
+class ReadableTable(Table):
+    """Keep ordinary rows intact; split only rows too tall for an entire page."""
+    def split(self, availWidth, availHeight):
+        self._calc(availWidth, availHeight)
+        self.splitInRow = int(any(height > 730 - self._rowHeights[0] for height in self._rowHeights[1:]))
+        return super().split(availWidth, availHeight)
+
+
+def matrix_figure(payload, selected=None):
+    import plotly.graph_objects as go
+    ranked = {c['id']: str(i+1) for i,c in enumerate(priorities(payload))}
+    points = [c for c in payload['components'] if c['assessment']['exposure'] is not None]
+    figure = go.Figure()
+    xs, ys = [], []
+    for c in points:
+        s=c['assessment']; xs.extend([s['impact'],s['impact'],None]); ys.extend([s['exposure'],s['residual'],None])
+    figure.add_trace(go.Scatter(x=xs,y=ys,mode='lines',line=dict(color='#888888',width=1),showlegend=False,hoverinfo='skip'))
+    for field,name,color,symbol,size in [('exposure','Before controls',RED,'circle',12),('residual','After controls (modeled)',GREEN,'diamond',7)]:
+        figure.add_trace(go.Scatter(x=[c['assessment']['impact'] for c in points],y=[c['assessment'][field] for c in points],
+            customdata=[c['id'] for c in points],name=name,mode='markers+text' if field=='exposure' else 'markers',
+            text=[ranked.get(c['id'],'') for c in points] if field=='exposure' else None,textposition='top right',
+            hovertext=[c['name']+f" · {c['assessment']['completeness']}% coverage" for c in points],
+            hovertemplate='%{hovertext}<br>Impact %{x}<br>Exposure %{y}<extra>%{fullData.name}</extra>',
+            marker=dict(size=size,symbol=symbol,color=color,opacity=.85,line=dict(width=[2 if c['id']==selected else 0 for c in points],color='#ffffff'))))
+    figure.add_hline(y=50,line_color='#777777',line_dash='dot',opacity=.4)
+    figure.add_vline(x=50,line_color='#777777',line_dash='dot',opacity=.4)
+    figure.update_layout(height=420,margin=dict(l=20,r=20,t=20,b=20),paper_bgcolor='#0b0d0f',plot_bgcolor='#101316',
+        font=dict(color='#e5e6e8'),legend=dict(orientation='h',y=-.2),
+        xaxis=dict(title='MISSION IMPACT',range=[-3,105],gridcolor='#35383c'),
+        yaxis=dict(title='EXPOSURE',range=[-3,105],gridcolor='#35383c'),clickmode='event+select')
+    return figure
+
+
+def matrix_drawing(payload):
+    drawing=Drawing(511,270)
+    left,bottom,width,height=42,43,450,200
+    def point(s,field): return left+width*s['impact']/100,bottom+height*s[field]/100
+    gray=colors.HexColor('#d7dce0')
+    for tick in range(0,101,25):
+        x=left+width*tick/100;y=bottom+height*tick/100
+        drawing.add(Line(x,bottom,x,bottom+height,strokeColor=gray,strokeWidth=.5))
+        drawing.add(Line(left,y,left+width,y,strokeColor=gray,strokeWidth=.5))
+        drawing.add(String(x,bottom-13,str(tick),fontName='Helvetica',fontSize=7,textAnchor='middle'))
+        drawing.add(String(left-7,y-2,str(tick),fontName='Helvetica',fontSize=7,textAnchor='end'))
+    drawing.add(String(left+width/2,15,'MISSION IMPACT',fontSize=8,textAnchor='middle'))
+    drawing.add(String(0,bottom+height+8,'EXPOSURE',fontSize=8))
+    points=[c for c in payload['components'] if c['assessment']['exposure'] is not None]
+    for c in points:
+        x,y=point(c['assessment'],'exposure');_,after=point(c['assessment'],'residual')
+        drawing.add(Line(x,y,x,after,strokeColor=colors.HexColor('#9ba3a8'),strokeWidth=.5))
+    for c in points:
+        x,y=point(c['assessment'],'exposure')
+        drawing.add(Circle(x,y,3.6,fillColor=None,strokeColor=colors.HexColor(RED),strokeWidth=1.2))
+    for c in points:
+        x,y=point(c['assessment'],'residual')
+        drawing.add(Polygon([x,y+2.4,x+2.4,y,x,y-2.4,x-2.4,y],fillColor=colors.HexColor(GREEN),strokeColor=colors.HexColor(GREEN)))
+    placed=[]
+    for rank,c in enumerate(priorities(payload),1):
+        x,y=point(c['assessment'],'exposure')
+        candidates=[(x+dx,y+dy) for dy in (8,-12,20,-24,32,-36) for dx in (7,-15,22,-30)]
+        candidates=[(min(left+width-10,max(left+2,a)),min(bottom+height-8,max(bottom+2,b))) for a,b in candidates]
+        a,b=next(((a,b) for a,b in candidates if all(abs(a-p)>12 or abs(b-q)>10 for p,q in placed)),candidates[-1])
+        placed.append((a,b))
+        drawing.add(Line(x,y,a,b,strokeColor=colors.HexColor('#888888'),strokeWidth=.4))
+        drawing.add(String(a,b,str(rank),fontName='Helvetica-Bold',fontSize=8,fillColor=colors.HexColor('#222222')))
+    return drawing
+
 
 def pdf_report(payload):
     output=BytesIO()
-    doc=SimpleDocTemplate(output,pagesize=(595.28,841.89),rightMargin=42,leftMargin=42,topMargin=46,bottomMargin=46,title='HEPHAESTUS assessment')
+    doc=SimpleDocTemplate(output,pagesize=(595.28,841.89),rightMargin=42,leftMargin=42,topMargin=34,bottomMargin=55,title='HEPHAESTUS assessment')
     styles=getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='SmallBody',fontName='Helvetica',fontSize=8,leading=11,spaceAfter=6,wordWrap='CJK',allowWidows=0,allowOrphans=0))
-    styles['BodyText'].fontSize=9
-    styles['BodyText'].leading=13
-    styles['BodyText'].allowWidows=0
-    styles['BodyText'].allowOrphans=0
-    styles['Heading1'].textColor=colors.HexColor('#9b252c')
-    styles['Heading2'].spaceBefore=15
-    story=[]
-    def text(value):
-        return escape(str(value)).replace('\n','<br/>')
-    def p(value,style='BodyText'):
-        return Paragraph(text(value),styles[style])
-    def link(url,label=None):
-        if urlparse(str(url)).scheme not in ('http','https'): return p(label or url,'SmallBody')
-        return Paragraph(f'<link href="{escape(str(url),quote=True)}" color="#9b252c">{text(label or url)}</link>',styles['SmallBody'])
-    def value(v): return 'Unknown' if v is None else str(v)
+    styles.add(ParagraphStyle(name='Compact',fontName='Helvetica',fontSize=8,leading=10,spaceAfter=3,wordWrap='CJK'))
+    styles.add(ParagraphStyle(name='Tiny',fontName='Helvetica',fontSize=7,leading=9,spaceAfter=3,wordWrap='CJK'))
+    styles.add(ParagraphStyle(name='SectionNote',parent=styles['Tiny']))
+    styles['Heading2'].fontSize=12;styles['Heading2'].spaceBefore=10;styles['Heading2'].spaceAfter=6
+    styles['Heading2'].keepWithNext=False
+    def clean(value): return escape(str(value)).replace('\n','<br/>')
+    def p(value,style='Compact'): return Paragraph(clean(value),styles[style])
+    def linked(label,url):
+        if urlparse(str(url)).scheme not in ('http','https'): return clean(label)
+        return f'<link href="{escape(str(url),quote=True)}" color="#225a88">{clean(label)}</link>'
     def table(rows,widths):
-        t=Table([[p(cell,'SmallBody') for cell in row] for row in rows],colWidths=widths,repeatRows=1,hAlign='LEFT')
-        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#eeeeee')),('VALIGN',(0,0),(-1,-1),'TOP'),('LINEBELOW',(0,0),(-1,0),.7,colors.HexColor('#9b252c')),('LINEBELOW',(0,1),(-1,-1),.3,colors.HexColor('#dddddd')),('LEFTPADDING',(0,0),(-1,-1),6),('RIGHTPADDING',(0,0),(-1,-1),6)]))
-        return t
-    story += [p('HEPHAESTUS','Title'),p('Component exposure assessment','Heading1'),p('Generated: '+payload['generated_at']),p('Evidence mode: '+payload['source']),p('SBOM SHA-256: '+payload.get('sbom_sha256','Unavailable'),'SmallBody'),Spacer(1,12)]
-    story.append(p('Interpretation','Heading2'))
-    story.extend(p(x) for x in payload['limitations'])
-    story += [p('Method','Heading2'),p('Mission impact = 100 x (criticality + deployment reach + recovery difficulty) / 15. Each input is 1-5. Exposure = 100 x sum(weight x observed factor) / sum(known weights). Weights: concentration 30, archived 15, branch safeguard gap 30, review gap 25. Completeness is the sum of known weights, not statistical confidence. Residual uses selected illustrative reductions with the same denominator. Contributor web research is excluded from both scores and completeness.')]
-    rows=[['Component / version','Impact','Exposure','Residual','Coverage']]
-    for c in payload['components']:
-        s=c['assessment'];rows.append([c['name']+' / '+c['version'],value(s['impact']),value(s['exposure']),value(s['residual']),str(s['completeness'])+'%'])
-    story += [p('Inventory summary','Heading2'),table(rows,[235,60,70,70,76])]
-    for c in payload['components']:
-        s=c['assessment'];e=c.get('evidence',{})
-        story += [CondPageBreak(360),p(c['name']+' / '+c['version'],'Heading1'),p('Inventory ID: '+c['id'],'SmallBody'),p('Evidence origin: '+e.get('mode','unknown')),p('Retrieved: '+str(e.get('fetched_at') or 'No live observation'),'SmallBody')]
-        if c.get('repo'): story.append(link('https://github.com/'+c['repo']))
-        story.append(p('Mission inputs: criticality {}, reach {}, recovery difficulty {} (each 1-5).'.format(*s['impact_inputs'])))
-        story.append(p('Impact: {} | Exposure: {} | Modeled residual: {} | Completeness: {}%'.format(s['impact'],value(s['exposure']),value(s['residual']),s['completeness'])))
-        story.append(p('Score drivers','Heading2'))
-        rows=[['Driver','Observed (0-1)','Weight','Assumed reduction']]
-        for d in s['drivers']: rows.append([d['factor'],d['observed'],d['weight'],str(round(d['modeled_reduction']*100))+'%'])
-        story.append(table(rows,[190,100,80,141]) if len(rows)>1 else p('No scored observations; exposure is unknown.'))
-        story.append(p('Proposed controls','Heading2'))
-        for key in s['selected_controls']:
-            title,control,factor,reduction=CONTROLS[key]
-            story.append(p(f'{title} ({control}): assumed {reduction:.0%} reduction of {factor}. Not verified implementation.'))
-        if not s['selected_controls']: story.append(p('None selected.'))
-        story.append(link(payload['baseline'],'OSPS Baseline v2026.08.28'))
-        draft=payload.get('generated_control_measures',{}).get(c['id'])
-        if draft:
-            story.append(p('Generated control measures - unverified proposals','Heading2'))
-            status='OUT OF DATE - assessment changed' if draft.get('stale') else 'Reviewed by user; implementation unverified' if draft.get('reviewed') else 'Draft - not reviewed'
-            story.append(p(f"{draft.get('provider')} | Model: {draft.get('model')} | Generated: {draft.get('generated_at')}",'SmallBody'))
-            story.append(p('Status: '+status))
-            story.append(p('These proposals do not change the deterministic scores or evidence coverage. Review source accuracy, applicability and authority before implementation.'))
-            if draft.get('operational_context'): story.append(p('Operational context: '+draft['operational_context'],'SmallBody'))
-            if draft.get('text'):
-                story.append(p('Unstructured model draft - review the text directly. No priorities or verification fields have been inferred.','SmallBody'))
-                for paragraph in draft['text'].split('\n\n'): story.append(p(paragraph,'SmallBody'))
-            for measure in draft.get('controls',[]):
-                story.append(CondPageBreak(100))
-                story.append(p(str(measure['id'])+'. '+measure['title'],'Heading3'))
-                story.append(p('Proposed implementation priority: '+measure['priority'],'SmallBody'))
-                story.append(p(measure['rationale']))
-                for index,action in enumerate(measure['actions'],1): story.append(p(f'{index}. {action}'))
-                story.append(p('Verify completion: '+measure['verification']))
-                for source in measure.get('source_urls',[]): story.append(link(source))
-        for note in e.get('notes',[]): story.append(p(note,'SmallBody'))
-        for source in e.get('sources',[]): story.append(link(source['url'],source['url']+' (HTTP '+str(source['http_status'])+')'))
-        for person in e.get('contributors',[]):
-            story.append(link(person.get('url',''),f"GitHub contributor {person.get('login','unknown')}: {person.get('contributions',0)} recorded contributions"))
-        research_records=[r for r in payload.get('contributor_research',{}).values() if r.get('repository')==c.get('repo')]
-        story.append(p('Contributor source research','Heading2'))
-        if not research_records: story.append(p('Not run for this repository.'))
-        for r in research_records:
-            story.append(p(f"Status: {r.get('status')} | Retrieved: {r.get('retrieved_at')} | Searches attempted: {r.get('searches_attempted',0)}",'SmallBody'))
-            story.append(p('Upstream revision: '+r.get('upstream_revision','unknown'),'SmallBody'))
-            for note in r.get('limitations',[]): story.append(p(note,'SmallBody'))
-            if r.get('error'): story.append(p(r['error']))
-            for person in r.get('contributors',[]):
-                story.append(p(person['login']+' - '+person['outcome'],'Heading3'))
-                for q in person.get('queries',[]): story.append(p('Query: '+q,'SmallBody'))
-                for err in person.get('errors',[]): story.append(p(err,'SmallBody'))
-                for source in person.get('sources',[]):
-                    story.append(link(source['url'],source['title']))
-                    story.append(p(source['url'],'SmallBody'))
-                    story.append(p('Heuristic match: '+source['heuristic_match']+'; human confirmation required.','SmallBody'))
-                    story.append(p(source['excerpt'],'SmallBody'))
-    story += [PageBreak(),p('Review and disposition','Heading1'),p('Verify repository mappings and missing safeguards before acceptance. Obtain mission-owner disposition; document an owner and expiry for exceptions. Selected controls are plans, not compliance evidence. Identity, nationality and U.S. Person status are unverified and require authorized attestation. Never infer them from names, language, location, or profile proxies.')]
+        table=ReadableTable(rows,colWidths=widths,repeatRows=1,hAlign='LEFT',splitInRow=1)
+        table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#e9edf0')),('VALIGN',(0,0),(-1,-1),'TOP'),
+            ('LINEBELOW',(0,0),(-1,0),.6,colors.HexColor('#52616b')),('LINEBELOW',(0,1),(-1,-1),.3,colors.HexColor('#dce0e3')),
+            ('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]))
+        return table
+    def section(title,note,content):
+        # Reserve the heading and first row, allowing the remaining rows to flow.
+        first_height=30
+        if isinstance(content,Table):
+            content._calc(511,740)
+            first_height=min(650,sum(content._rowHeights[:2]))
+        story.extend([CondPageBreak(first_height+64),p(title,'Heading2'),p(note,'SectionNote'),content])
+    unknown=sum(c['assessment']['exposure'] is None for c in payload['components'])
+    synthetic=any('synthetic' in c.get('evidence',{}).get('mode','').lower() for c in payload['components'])
+    story=[p('HEPHAESTUS','Title'),p('Generated '+payload['generated_at'][:19].replace('T',' ')+' UTC | '+str(len(payload['components']))+' components','Tiny')]
+    if synthetic: story.append(p('SYNTHETIC EVIDENCE - illustrative scenario, not repository findings.'))
+    else: story.append(p('Evidence mode: '+payload.get('source','Unknown')))
+    story.extend([p('1. Mission exposure matrix','Heading2'),matrix_drawing(payload),
+        Paragraph(f'<font color="{RED}">Red circles: before controls</font> | <font color="{GREEN}">Green diamonds: after controls (modeled)</font>',styles['Compact']),
+        p(f'{unknown} component(s) with unknown exposure omitted from plot and ranking. Numbers match the priority table.','Tiny')])
+    rows=[[p(x) for x in ('# / Component','Priority','Before / After','Coverage','Justification')]]
+    for rank,c in enumerate(priorities(payload),1):
+        result=c['assessment']
+        name=f'{rank}. {c["name"]} / {c["version"]}'
+        sources=[source['url'] for source in c.get('evidence',{}).get('sources',[]) if source.get('http_status')==200 and source.get('url')][:2]
+        reason=clean(justification(c))
+        if sources: reason+='<br/>'+' / '.join(linked('Source '+str(i+1),url) for i,url in enumerate(sources))
+        rows.append([p(name),p(priority_value(result)),p(f'{result["exposure"]:g} / {result["residual"]:g}'),p(f'{result["completeness"]}%'),Paragraph(reason,styles['Compact'])])
+    section('2. Ten highest-priority components',
+        'Priority = mission impact x exposure before controls / 100. Higher values receive earlier review.',
+        table(rows,[136,42,65,47,221]) if len(rows)>1 else p('No components have scored evidence yet.'))
+    plan=selected_plan(payload)
+    if not plan: content=p('No controls selected for implementation')
+    else:
+        rows=[[p('Selected action'),p('Applies to components')]]
+        for item in plan:
+            # Lists of Paragraphs allow long action/component cells to split across pages.
+            actions=[Paragraph(linked(item['control'],item['source']),styles['Compact'])]
+            actions += [p(action) for action in item['actions']]
+            if item['modeled']: actions.append(p('Illustrative modeled reduction; verify effectiveness.','Tiny'))
+            rows.append([actions,[p(label) for label in item['components']]])
+        content=table(rows,[280,231])
+    section('3. Selected implementation plan','Proposed, not verified implemented. Generated actions have no automatic score effect.',content)
     def footer(canvas,doc):
-        canvas.setFont('Helvetica',8);canvas.setFillColor(colors.HexColor('#555555'));canvas.drawString(42,26,'HEPHAESTUS | Assessment report');canvas.drawRightString(553,26,str(doc.page))
+        canvas.setFont('Helvetica',7);canvas.setFillColor(colors.HexColor('#505c65'))
+        canvas.drawString(42,34,'Ordinal prioritization; incomplete evidence may conceal exposure. Control effects are assumptions.')
+        canvas.drawString(42,24,'Full evidence, sources, mission assignment and all drafts: accompanying JSON sidecar.')
+        canvas.drawRightString(553,14,'HEPHAESTUS | '+str(doc.page))
     doc.build(story,onFirstPage=footer,onLaterPages=footer)
     return output.getvalue()

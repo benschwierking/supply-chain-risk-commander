@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 import pytest
-from core import parse_sbom, repository, score, sidecar, report
+from core import parse_sbom, read_sbom, repository, repository_input, score, sidecar, report
 from evidence import collect
 
 @pytest.mark.parametrize('name',['cyclonedx','spdx'])
@@ -22,6 +22,50 @@ def test_mapping():
     assert repository('pkg:github/psf/requests@v1')=='psf/requests'
     assert repository('https://github.com.attacker.test/psf/requests') is None
     assert repository('https://example.org/github.com/psf/requests') is None
+
+def test_mapping_input_and_duplicate_ids_remain_distinct():
+    assert repository_input(' owner/repo ')=='owner/repo'
+    assert repository_input('https://github.com/owner/repo.git')=='owner/repo'
+    assert repository_input('') is None
+    for value in ['../repo','owner/..','https://example.org/owner/repo','https://[invalid']:
+        with pytest.raises(ValueError): repository_input(value)
+    _, components, _=parse_sbom({'bomFormat':'CycloneDX','components':[
+        {'name':'one','bom-ref':'x'}, {'name':'two','bom-ref':'x#3'},
+        {'name':'three','bom-ref':'x'}, {'name':'four','bom-ref':'x#3'}]})
+    assert len({component['id'] for component in components})==4
+
+@pytest.mark.parametrize('name', ['cyclonedx', 'spdx', 'spdx3'])
+def test_wrapped_sbom_preserves_components(name):
+    data = json.loads(Path('samples/'+name+'.json').read_bytes())
+    expected_format, expected_components, _ = parse_sbom(data)
+    fmt, items, warnings = read_sbom(json.dumps({'sbom': data}).encode())
+    assert fmt == expected_format and items == expected_components
+    assert warnings == ['Read the inventory from the JSON sbom wrapper.']
+
+@pytest.mark.parametrize(('raw', 'message'), [
+    (b'  ', 'file is empty'),
+    (b'{\n "components": [}', 'line 2, column 17'),
+    (b'\xff\xfe\xff', 'UTF-8'),
+    (b'{}', 'Valid JSON, but its SBOM format was not recognized'),
+    (b'"quoted JSON"', 'quoted JSON string'),
+    (b' ' * (10 * 1024 * 1024 + 1), '10 MB'),
+], ids=['empty', 'syntax', 'encoding', 'unsupported', 'quoted', 'size'])
+def test_upload_error_explains_failure(raw, message):
+    with pytest.raises(ValueError, match=message): read_sbom(raw)
+
+def test_upload_accepts_utf8_bom():
+    raw = b'\xef\xbb\xbf' + Path('samples/spdx.json').read_bytes()
+    fmt, items, warnings = read_sbom(raw)
+    assert fmt == 'SPDX' and len(items) == 6 and not warnings
+
+@pytest.mark.parametrize('data', [
+    {'bomFormat': 'CycloneDX', 'components': [{'name': 'component', 'externalReferences': [{'url': 'https://[invalid'}, {'url': 'https://github.com/owner/repo'}]}]},
+    {'spdxVersion': 'SPDX-2.3', 'packages': [{'name': 'component', 'externalRefs': [{'referenceLocator': 'https://[invalid'}, {'referenceLocator': 'https://github.com/owner/repo'}]}]},
+])
+def test_malformed_mapping_keeps_inventory(data):
+    _, items, warnings = parse_sbom(data)
+    assert len(items) == 1 and items[0]['repo'] == 'owner/repo'
+    assert any('malformed repository URL ignored' in warning for warning in warnings)
 
 def test_unknown_and_mitigation():
     unknown=score({},[3,3,3],['review'])

@@ -5,8 +5,8 @@ import os
 from pathlib import Path
 import streamlit as st
 import plotly.graph_objects as go
-from core import parse_sbom, score, sidecar, CONTROLS, BASELINE
-from evidence import collect, synthetic
+from core import read_sbom, repository_input, score, sidecar, CONTROLS, BASELINE
+from evidence import collect, collect_inventory, collection_status, unknown_evidence, synthetic
 from research import run_batch
 from reporting import pdf_report
 from tutorial import coach, start as start_tutorial, active as tutorial_active
@@ -17,6 +17,14 @@ st.markdown("<style>" + Path('assets/theme.css').read_text() + ":root{--network-
 if 'view' not in st.session_state: st.session_state.view='assessment'
 def go_assessment(): st.session_state.view='assessment'
 def go_readme(): st.session_state.view='readme'
+def request_assessment_collection(repositories):
+    st.session_state.evidence_mode='Live GitHub'
+    st.session_state.collect_assessment_requested=True
+    st.session_state.assessment_requested_repos=list(repositories)
+def request_assessment_retry(repositories):
+    request_assessment_collection(repositories)
+    st.session_state.retry_assessment_requested=True
+def display_score(value): return 'Unknown' if value is None else f'{value:.1f}'
 
 if 'sidebar_open' not in st.session_state:
     st.session_state.sidebar_open=True
@@ -31,8 +39,9 @@ st.markdown('<div class="brand"><img src="data:image/svg+xml;base64,'+base64.b64
 with st.sidebar:
     st.subheader('Inventory', help='Choose an evidence source and import a CycloneDX, SPDX 2.x JSON, or SPDX 3 JSON-LD inventory.')
     coach('inventory')
-    mode=st.radio('Evidence mode',['Offline scenario','Live GitHub'], help='Offline evidence is synthetic. Uploaded SBOMs never inherit demo findings.')
+    mode=st.radio('Evidence mode',['Offline scenario','Live GitHub'],key='evidence_mode', help='Offline evidence is synthetic for bundled samples only. Uploaded SBOMs start without evidence. Collect assessment evidence switches to Live GitHub and collects observations after you click; upload alone does not start requests.')
     upload=st.file_uploader('Import an SBOM',type=['json','jsonld'], help='CycloneDX, SPDX 2.x JSON, or SPDX 3 JSON-LD, up to 10 MB. Repository links come from the file and require verification.')
+    upload_status=st.empty()
     sample=st.selectbox('Sample inventory',['CycloneDX','SPDX','SPDX 3'], help='Bundled example inventories. Offline scenario values are synthetic, not findings about the listed projects.')
     token=st.text_input('GitHub token (optional)',type='password',value=os.getenv('GITHUB_TOKEN',''), help=(
         'GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token. '
@@ -59,25 +68,38 @@ if st.session_state.view=='readme':
 
 raw=upload.getvalue() if upload else Path('samples/'+{'CycloneDX':'cyclonedx.json','SPDX':'spdx.json','SPDX 3':'spdx3.json'}[sample]).read_bytes()
 try:
-    fmt,components,warnings=parse_sbom(json.loads(raw))
+    fmt,components,warnings=read_sbom(raw)
 except (ValueError,TypeError,RecursionError) as exc:
-    st.error(f'Cannot read inventory: {exc}'); st.stop()
+    if upload:
+        upload_status.error('Inventory could not be loaded. See the error in the main panel.')
+    st.error(f'Cannot read inventory: {exc}')
+    st.info('Remove the file to return to the sample inventory, or upload another SBOM. Your previous assessment stays in this session until a different valid inventory is loaded.')
+    st.stop()
+if upload:
+    upload_status.success(f'Loaded {fmt} · {len(components):,} components')
 for w in warnings: st.warning(w)
 fingerprint=hashlib.sha256(raw).hexdigest()[:16]
-context=fingerprint+mode
+context=fingerprint+('uploaded' if upload else mode)
 if st.session_state.get('context') != context:
+    migrated_upload=bool(upload and st.session_state.get('context') in (fingerprint+'Offline scenario',fingerprint+'Live GitHub'))
     st.session_state.context=context
-    st.session_state.component_choice=components[0]['id']
-    st.session_state.assessments={}
-    st.session_state.research_cache={}
-    st.session_state.evidence={c['id']:synthetic(i) if mode=='Offline scenario' and not upload else {'mode':'unknown','factors':{},'notes':['Fetch live evidence to assess this uploaded component.'],'sources':[]} for i,c in enumerate(components)}
+    if not migrated_upload:
+        st.session_state.component_choice=components[0]['id']
+        st.session_state.assessments={}
+        st.session_state.research_cache={}
+        st.session_state.repository_overrides={}
+        st.session_state.evidence={c['id']:synthetic(i) if mode=='Offline scenario' and not upload else unknown_evidence() for i,c in enumerate(components)}
 evidence=st.session_state.evidence
+for component in components:
+    if component['id'] in st.session_state.get('repository_overrides',{}):
+        component['repo']=st.session_state.repository_overrides[component['id']]
+        component['mapping']='User-supplied repository; verify upstream identity' if component['repo'] else 'Unmapped by user'
 def build_payload():
     results={}
     for item in components:
         saved=st.session_state.assessments.get(item['id'],{'inputs':[3,3,3],'controls':[]})
         results[item['id']]=score(evidence[item['id']],saved['inputs'],saved['controls'])
-    payload=sidecar(components,evidence,results,mode+' / '+('uploaded SBOM' if upload else 'bundled synthetic scenario'),st.session_state.get('research_cache',{}))
+    payload=sidecar(components,evidence,results,mode+' / '+('uploaded SBOM' if upload else 'bundled sample inventory'),st.session_state.get('research_cache',{}))
     payload['sbom_sha256']=hashlib.sha256(raw).hexdigest()
     return payload
 @st.cache_data(show_spinner=False,max_entries=8)
@@ -85,23 +107,69 @@ def report_bytes(serialized): return pdf_report(json.loads(serialized))
 if st.session_state.view=='report':
     payload=build_payload()
     st.subheader('Assessment report',help='All components are included, including those with missing observations. Proposed controls remain modeled assumptions.')
-    st.dataframe([{'Component':c['name'],'Impact':c['assessment']['impact'],'Exposure':c['assessment']['exposure'],'Residual':c['assessment']['residual'],'Coverage %':c['assessment']['completeness']} for c in payload['components']],hide_index=True,width='stretch')
+    st.dataframe([{'Component':c['name'],'Impact':c['assessment']['impact'],'Exposure':display_score(c['assessment']['exposure']),'Residual':display_score(c['assessment']['residual']),'Coverage %':c['assessment']['completeness'],'Evidence status':collection_status(c['evidence'],c.get('repo'))} for c in payload['components']],hide_index=True,width='stretch')
+    st.caption('Impact is calculated from your mission inputs. The starting values of 3/5 each give 60; review them for each component. Unknown exposure means observations are missing, not that exposure is zero.')
     for limitation in payload['limitations']: st.caption(limitation)
     serialized=json.dumps(payload,indent=2)
     st.download_button('Download PDF report',report_bytes(serialized),file_name='hephaestus-assessment.pdf',mime='application/pdf')
     st.download_button('Download JSON sidecar',serialized,file_name='hephaestus-sidecar.json',mime='application/json')
     st.stop()
 st.caption('01  Upload  /  02  Research  /  03  Assessment  /  04  Report')
-if mode=='Offline scenario':
-    st.caption('Synthetic scenario · Values are fictional; they are not repository findings.' if not upload else 'Offline inventory · Evidence has not been collected.')
+if upload:
+    st.caption('Uploaded inventory · Collect repository evidence and set mission inputs to assess components.')
+elif mode=='Offline scenario':
+    st.caption('Synthetic scenario · Values are fictional; they are not repository findings.')
 else: st.caption('GitHub evidence · Verify repository mappings before relying on observations.')
 coach('mapping')
-with st.expander('Inventory & repository mapping',expanded=tutorial_active() and st.session_state.get('tutorial_step')==1):
+unmapped=sum(not c['repo'] for c in components)
+with st.expander('Inventory & repository mapping',expanded=bool(upload and unmapped) or tutorial_active() and st.session_state.get('tutorial_step')==1):
+    st.caption(f'{len(components)-unmapped:,} of {len(components):,} components have GitHub mappings. Package names and registry identifiers alone do not establish the upstream repository.')
     st.dataframe(components,hide_index=True,width='stretch')
-    st.download_button('Download sample SBOM',raw,file_name='inventory.json',mime='application/json')
+    mapping_id=st.selectbox('Component repository mapping',[c['id'] for c in components],format_func=lambda ref:next(c['name']+' ['+ref+']' for c in components if c['id']==ref),key='mapping_component_'+context)
+    mapping_component=next(c for c in components if c['id']==mapping_id)
+    mapping_value=st.text_input('GitHub repository (owner/repository or URL)',value=mapping_component['repo'] or '',key='mapping_value_'+context+mapping_id,help='Use the verified upstream GitHub repository. Leave blank to remove a mapping. This does not change the original SBOM. Saving a changed mapping clears only that component\'s old observations.')
+    if st.button('Save repository mapping',key='save_mapping'):
+        try:
+            new_repo=repository_input(mapping_value)
+            if new_repo!=mapping_component['repo']:
+                st.session_state.setdefault('repository_overrides',{})[mapping_id]=new_repo
+                evidence[mapping_id]=unknown_evidence()
+                st.session_state.pop('assessment_scope_'+context,None)
+            st.rerun()
+        except ValueError as exc: st.error(str(exc))
+    st.download_button('Download imported SBOM' if upload else 'Download sample SBOM',raw,file_name='inventory.json',mime='application/json')
+repos=list(dict.fromkeys(c['repo'] for c in components if c['repo']))
+if upload:
+    if unmapped:
+        st.warning(f'{unmapped:,} component(s) need repository mappings before GitHub evidence can be collected. Add them under Inventory & repository mapping.')
+    st.info('Upload imports the component list. Collect assessment evidence below to calculate exposure. Mission impact uses your three mission inputs; their initial values give 60.')
+
+st.subheader('Assessment evidence',help='Collect the GitHub observations used by exposure and completeness. This is separate from optional Tavily contributor-source research. It never spends Tavily credits.')
+coach('assessment_collection')
+if st.session_state.get('collect_assessment_requested'):
+    st.session_state['assessment_scope_'+context]=[repo for repo in st.session_state.get('assessment_requested_repos',[]) if repo in repos]
+if 'assessment_scope_'+context not in st.session_state:
+    st.session_state['assessment_scope_'+context]=repos[:25]
+assessment_scope=st.multiselect('Repositories for assessment',repos,max_selections=25,key='assessment_scope_'+context,help='Collect up to 25 repositories per run. Every component sharing a repository receives the same observations. Choose another group for larger inventories. Collected observations stay cached in this session.')
+st.caption('Collection uses GitHub only; a Tavily key is not needed. Up to 25 repositories per run. Missing observations stay unknown and are listed in Evidence.')
+action_left,action_right=st.columns(2)
+action_left.button('Collect assessment evidence',key='collect_assessment',type='primary',disabled=not assessment_scope,on_click=request_assessment_collection,args=(assessment_scope,),help='Switch to Live GitHub and collect repository metadata, available branch settings, and contributors for the selected repositories. Previously collected observations are reused.')
+action_right.button('Retry missing evidence',key='retry_assessment',disabled=not assessment_scope,on_click=request_assessment_retry,args=(assessment_scope,),help='Retry selected repositories with failed or partial collection, for example after replacing an expired token. Repositories without failures use cached observations.')
+collection_requested=st.session_state.pop('collect_assessment_requested',False)
+collection_retry=st.session_state.pop('retry_assessment_requested',False)
+if collection_requested:
+    requested_repos=st.session_state.pop('assessment_requested_repos',assessment_scope)
+    progress=st.progress(0,text='Collecting assessment evidence')
+    count=collect_inventory(components,evidence,requested_repos,token,use_scorecard,retry=collection_retry,
+        progress=lambda i,n,r:progress.progress(i/n,text=f'GitHub {i}/{n}: {r}'))
+    progress.empty()
+    available=sum(bool(evidence[c['id']].get('factors')) for c in components if c['repo'] in requested_repos)
+    if available:
+        st.success(f'Collection finished: {available:,} component(s) have observations. Queried {count} repositories; reused session evidence where available. Review evidence coverage below.')
+    else:
+        st.error('No scored observations returned. Review Evidence for HTTP errors, check repository mappings and your token, then use Retry missing evidence.')
 st.subheader('Research',help='Review the mappings before selecting repositories. GitHub supplies governance observations; Tavily finds public contributor sources. Research never starts on upload or rerender.')
 coach('research')
-repos=list(dict.fromkeys(c['repo'] for c in components if c['repo']))
 selected_repos=st.multiselect('Repositories to research',repos,default=repos[:5],max_selections=5,key='research_repos_'+context,help='Select up to five verified GitHub mappings. Components sharing one repository share a single research result.')
 top_n=st.number_input('Contributors per repository',min_value=1,max_value=3,value=3,step=1,help='Top named non-bot contributors from the returned GitHub sample. Two web searches per contributor; this is a bounded sample, not a complete maintainer audit.')
 st.caption(f'Up to {len(selected_repos)*top_n*2} Tavily searches per run (maximum 30). Deep extraction is disabled. Cached scopes are reused.')
@@ -112,12 +180,8 @@ retry=st.button('Retry failed research',disabled=not failed or not tavily_key or
 if run or retry:
     targets=failed if retry else selected_repos
     progress=st.progress(0,text='Collecting repository evidence')
-    for index,repo in enumerate(targets):
-        related=[c for c in components if c['repo']==repo]
-        prior=next((evidence[c['id']] for c in related if evidence[c['id']].get('mode')=='live GitHub REST'),None)
-        observation=prior or collect(repo,token,use_scorecard)
-        for component in related: evidence[component['id']]=observation
-        progress.progress((index+1)/len(targets),text=f'GitHub: {repo}')
+    collect_inventory(components,evidence,targets,token,use_scorecard,
+        progress=lambda i,n,r:progress.progress(i/n,text=f'GitHub: {r}'))
     if tavily_key:
         run_batch(targets,int(top_n),token,tavily_key,project_id,st.session_state.research_cache,retry=retry,
                   progress=lambda i,n,r: progress.progress(i/n,text=f'Contributor research: {r}'))
@@ -135,14 +199,17 @@ selected=st.selectbox('Inspect component',list(labels),format_func=labels.get,ke
 c=next(c for c in components if c['id']==selected)
 if mode=='Live GitHub':
     col1,col2=st.columns([1,3])
-    with col1: fetch=st.button('Fetch evidence',type='primary', help='Fetch repository metadata, branch settings, and up to 100 contributor records for this component. Other components are unchanged.')
+    with col1: fetch=st.button('Fetch evidence',disabled=not c['repo'], help='Refresh repository metadata, branch settings, and up to 100 contributor records. All components mapped to this repository receive the same evidence.')
     if fetch:
         with st.spinner('Collecting public repository evidence…'):
-            evidence[selected]=collect(c['repo'],token,use_scorecard)
+            observation=collect(c['repo'],token,use_scorecard)
+            for related in components:
+                if related['repo']==c['repo']: evidence[related['id']]=observation
         st.session_state.evidence=evidence
 left,right=st.columns([1.35,1])
 with right:
     st.subheader('Mission & response', help='Set the consequences of this component failing or being compromised. Each input uses a 1–5 scale; higher means greater impact. Defaults are 3 and should be reviewed.')
+    st.caption('Mission impact is your operational judgment, not a value extracted from the SBOM. Starting inputs of 3/5 each produce 60; set each scale for this component.')
     saved=st.session_state.assessments.get(selected, {'inputs':[3,3,3], 'controls':[]})
     coach('criticality')
     a=st.slider('Operational criticality',1,5,saved['inputs'][0],key=context+selected+'a', help='How essential is this component to the operation? 1: optional convenience. 2: minor degradation. 3: important function degraded. 4: core operation disrupted. 5: mission cannot continue.')
@@ -162,6 +229,8 @@ for item in components:
     saved=st.session_state.assessments.get(ref, {'inputs':[3,3,3], 'controls':[]})
     results[ref]=score(evidence[ref], saved['inputs'], saved['controls'])
 s=results[selected]
+with st.expander('Component assessment status',expanded=bool(upload)):
+    st.dataframe([{'Component':item['name'],'GitHub repository':item['repo'] or 'Unmapped','Collection status':collection_status(evidence[item['id']],item['repo']),'Impact':results[item['id']]['impact'],'Exposure':display_score(results[item['id']]['exposure']),'Modeled residual':display_score(results[item['id']]['residual']),'Coverage':str(results[item['id']]['completeness'])+'%'} for item in components],hide_index=True,width='stretch')
 with left:
     coach('matrix')
     st.subheader('Mission exposure matrix', help='Click a point to inspect a component. Horizontal: mission impact, 20–100. Vertical: observed governance/contributor exposure, 0–100. Circles show baseline; diamonds show modeled residual. Point size shows evidence completeness. Quadrant dividers at 50 are visual guides, not acceptance thresholds.')
@@ -189,6 +258,10 @@ for col,label,value in zip(cols,['Mission impact','Observed exposure','Modeled r
     metric_help={'Mission impact':'100 × sum of the three mission inputs / 15. Range: 20–100. Higher means greater consequence.', 'Observed exposure':'Weighted index of observed contributor/governance drivers, 0–100. Higher means greater observed exposure. Unknown factors are excluded; this is not a probability or evidence of malicious intent.', 'Modeled residual':'Exposure after illustrative reductions for selected controls. Range: 0–100. A lower value is a scenario result, not verified improvement.', 'Evidence completeness':'Percentage of model weights with observations, 0–100%. Higher means more coverage, not greater statistical confidence. Missing evidence may conceal exposure.'}
     col.metric(label,'Unknown' if value is None else value, help=metric_help[label])
 if s['completeness']<60: st.warning('Limited evidence. A low observed score cannot establish low overall exposure; prioritize verification.')
+if s['exposure'] is None:
+    if not c['repo']: st.info('This component needs a verified GitHub repository mapping. Add one in Inventory & repository mapping, then collect assessment evidence.')
+    elif evidence[selected].get('mode')=='unknown': st.info('No assessment evidence collected for this component yet. Include its repository in Repositories for assessment and click Collect assessment evidence.')
+    else: st.error('Collection returned no scored observations for this component. Review the errors in Evidence and use Retry missing evidence after correcting the cause.')
 coach('evidence')
 t1,t2,t3=st.tabs(['Evidence','Method','Export'])
 with t1:
@@ -198,7 +271,7 @@ with t1:
     st.caption('Retrieved: '+str(e.get('fetched_at') or 'Not a live observation'))
     if c['repo']: st.link_button('Open mapped GitHub repository','https://github.com/'+c['repo'])
     st.caption('Repository mapping: '+c['mapping'])
-    st.dataframe([{'driver':k,'observed value':e.get('factors',{}).get(k),'weight':w} for k,w in __import__('core').WEIGHTS.items()],hide_index=True,width='stretch')
+    st.dataframe([{'driver':k,'observed value':str(e['factors'][k]) if e.get('factors',{}).get(k) is not None else 'Unknown','weight':w} for k,w in __import__('core').WEIGHTS.items()],hide_index=True,width='stretch')
     for note in e.get('notes',[]): st.write('• '+note)
     for source in e.get('sources',[]): st.markdown(f"[Source · HTTP {source['http_status']}]({source['url']})")
     if e.get('contributors'):

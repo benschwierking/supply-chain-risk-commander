@@ -96,6 +96,64 @@ def uploaded_app(monkeypatch, components):
     monkeypatch.setattr('streamlit.file_uploader', lambda *args, **kwargs:BytesIO(raw))
     return load()
 
+def test_missing_mappings_explain_blocker_and_explicit_lookup_then_review(monkeypatch):
+    calls=[]
+    collected=[]
+    exports=[]
+    def lookup(purl):
+        calls.append(purl)
+        return {'schema':'hephaestus-repository-lookup/1.0','status':'candidate','candidates':[{'repository':'acme/project','url':'https://github.com/acme/project','fields':['Source']}], 'source_url':'https://pypi.org/pypi/project/1/json','message':'Review upstream identity.','retrieved_at':'2026-10-15'}
+    monkeypatch.setattr('mapping.lookup_repository',lookup)
+    monkeypatch.setattr('reporting.pdf_report',lambda payload:exports.append(payload) or b'%PDF-1.4 test')
+    monkeypatch.setattr('evidence.collect',lambda repo,*args:collected.append(repo) or {'mode':'live GitHub REST','factors':{'archived':0},'sources':[],'notes':[]})
+    app=uploaded_app(monkeypatch,[{'name':'one','bom-ref':'one','purl':'pkg:pypi/project@1'},{'name':'two','bom-ref':'two','purl':'pkg:pypi/project@1'}])
+    assert app.button(key='collect_assessment').disabled and app.button(key='run_research').disabled
+    assert 'Switch to' not in app.button(key='collect_assessment').help
+    assert any('no GitHub repository mappings' in item.value for item in app.info)
+    assert calls==[] and collected==[]
+    app.slider[0].set_value(5).run()
+    app.button(key='find_mappings').click().run()
+    assert not app.exception and len(calls)==1 and not collected
+    assert app.button(key='collect_assessment').disabled
+    assert app.multiselect(key='mapping_suggestions_'+app.session_state.context).value==[]
+    app.run()
+    assert len(calls)==1
+    app.multiselect(key='mapping_suggestions_'+app.session_state.context).set_value(['one → acme/project','two → acme/project']).run()
+    app.button(key='apply_mappings').click().run()
+    assert not app.exception and not app.button(key='collect_assessment').disabled
+    assert not collected and app.slider[0].value==5 and app.metric[1].value=='Unknown'
+    assert next(t for t in app.text_input if t.label=='GitHub repository (owner/repository or URL)').value=='acme/project'
+    app.button(key='collect_assessment').click().run()
+    assert not app.exception and collected==['acme/project']
+    assert app.metric[0].value=='73.3' and app.metric[1].value=='0.0' and app.metric[3].value=='15%'
+    app.button(key='readme_nav').click().run()
+    app.button(key='back_assessment').click().run()
+    assert not app.exception and app.slider[0].value==5 and len(calls)==1
+    app.button(key='finish_assessment').click().run()
+    assert not app.exception and exports[-1]['repository_mapping_discovery']['component_associations']['two']['repository']=='acme/project'
+    assert exports[-1]['sbom_sha256']
+
+def test_research_button_chooses_live_without_separate_mode_switch(monkeypatch):
+    calls=[]
+    monkeypatch.setattr('evidence.collect',lambda repo,*args:calls.append(repo) or {'mode':'live GitHub REST','factors':{'archived':0},'sources':[],'notes':[]})
+    app=load()
+    assert app.radio[0].value=='Offline scenario' and not app.button(key='run_research').disabled
+    next(m for m in app.multiselect if m.label=='Repositories to research').set_value(['psf/requests']).run()
+    app.button(key='run_research').click().run()
+    assert not app.exception and app.radio[0].value=='Live GitHub' and calls==['psf/requests']
+    assert next(m for m in app.multiselect if m.label=='Repositories to research').value==['psf/requests']
+    app.run()
+    assert calls==['psf/requests']
+
+def test_fetch_uploaded_component_explicitly_chooses_live(monkeypatch):
+    calls=[]
+    monkeypatch.setattr('evidence.collect',lambda repo,*args:calls.append(repo) or {'mode':'live GitHub REST','factors':{'archived':1},'sources':[],'notes':[]})
+    app=uploaded_app(monkeypatch,[{'name':'one','bom-ref':'one','purl':'pkg:github/owner/project@1'}])
+    assert app.radio[0].value=='Offline scenario'
+    next(b for b in app.button if b.label=='Fetch evidence').click().run()
+    assert not app.exception and app.radio[0].value=='Live GitHub' and calls==['owner/project']
+    assert app.metric[1].value=='100.0'
+
 def test_uploaded_assessment_collects_without_tavily_and_preserves_inputs(monkeypatch):
     calls=[]
     def collect(repo, *args):

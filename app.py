@@ -12,6 +12,7 @@ from reporting import pdf_report
 from tutorial import coach, start as start_tutorial, active as tutorial_active
 from connections import check_credential, connection_key
 from local_llm import PROVIDERS, local_base_url, list_models, preferred_model, control_context, context_fingerprint, generate_controls
+from mapping import MAX_LOOKUPS, package_ref, purl_type, pending_lookups, lookup_batch, candidate_options, apply_candidates
 
 st.set_page_config(page_title='HEPHAESTUS', page_icon='assets/favicon.svg', layout='wide', initial_sidebar_state='expanded')
 network_image=base64.b64encode(Path('assets/network.png').read_bytes()).decode()
@@ -26,6 +27,11 @@ def request_assessment_collection(repositories):
 def request_assessment_retry(repositories):
     request_assessment_collection(repositories)
     st.session_state.retry_assessment_requested=True
+def enable_live_mode():
+    st.session_state.evidence_mode='Live GitHub'
+def request_research(repositories,retry=False):
+    enable_live_mode()
+    st.session_state.research_requested={'repositories':list(repositories),'retry':retry}
 def display_score(value): return 'Unknown' if value is None else f'{value:.1f}'
 def credential_feedback(service, secret, project=''):
     label='GitHub token' if service=='github' else 'Tavily API key'
@@ -148,14 +154,24 @@ if st.session_state.get('context') != context:
         st.session_state.assessments={}
         st.session_state.research_cache={}
         st.session_state.repository_overrides={}
+        st.session_state.mapping_lookup_cache={}
+        st.session_state.mapping_provenance={}
+        st.session_state.pop('mapping_input_updates',None)
+        st.session_state.pop('mapping_applied',None)
         st.session_state.control_drafts={}
         st.session_state.control_contexts={}
         st.session_state.evidence={c['id']:synthetic(i) if mode=='Offline scenario' and not upload else unknown_evidence() for i,c in enumerate(components)}
 evidence=st.session_state.evidence
+mapping_cache=st.session_state.setdefault('mapping_lookup_cache',{})
+mapping_provenance=st.session_state.setdefault('mapping_provenance',{})
+for ref,repo in st.session_state.pop('mapping_input_updates',{}).items():
+    st.session_state['mapping_value_'+context+ref]=repo
 for component in components:
     if component['id'] in st.session_state.get('repository_overrides',{}):
         component['repo']=st.session_state.repository_overrides[component['id']]
         component['mapping']='User-supplied repository; verify upstream identity' if component['repo'] else 'Unmapped by user'
+        if component['id'] in mapping_provenance:
+            component['mapping']='User-reviewed metadata suggestion; upstream identity not independently authenticated'
 def build_payload():
     results={}
     for item in components:
@@ -165,6 +181,7 @@ def build_payload():
     payload['sbom_sha256']=hashlib.sha256(raw).hexdigest()
     payload['schema']='hephaestus-risk-sidecar/1.2'
     payload['generated_control_measures']={}
+    payload['repository_mapping_discovery']={'schema':'hephaestus-repository-mappings/1.0','records':mapping_cache,'component_associations':mapping_provenance}
     for item in components:
         draft=st.session_state.get('control_drafts',{}).get(item['id'])
         if draft:
@@ -195,23 +212,69 @@ unmapped=sum(not c['repo'] for c in components)
 with st.expander('Inventory & repository mapping',expanded=bool(upload and unmapped) or tutorial_active() and st.session_state.get('tutorial_step')==1):
     st.caption(f'{len(components)-unmapped:,} of {len(components):,} components have GitHub mappings. Package names and registry identifiers alone do not establish the upstream repository.')
     st.dataframe(components,hide_index=True,width='stretch')
+    if upload or unmapped or mapping_cache:
+        st.markdown('**Find upstream repositories**',help='Looks up public PyPI, npm, and Maven Central metadata, or reads GitHub-based Go package paths. Sends package names and versions to those registries without tokens, mission inputs, or Tavily searches. Results stay cached. Private registries and other package types require manual mappings. Publisher metadata needs your review; it does not establish upstream identity.')
+        types={}
+        for item in components:
+            if not item['repo']:
+                kind=purl_type(item.get('purl'))
+                types[kind]=types.get(kind,0)+1
+        st.caption('Unmapped package types: '+', '.join(f'{kind}: {count:,}' for kind,count in sorted(types.items()))+'.' if types else 'Every component has a repository mapping. Review the sources before collection.')
+        st.caption('Find candidates from public package metadata, then review and apply. Up to 25 unique packages per click; discovery does not collect assessment evidence.')
+        pending=pending_lookups(components,mapping_cache)
+        retry_pending=pending_lookups(components,mapping_cache,retry=True)
+        st.caption(f'{len(pending):,} supported package lookup(s) remaining · {len(retry_pending):,} failed lookup(s) available to retry.')
+        find_col,retry_col=st.columns(2)
+        find_mappings=find_col.button('Find repository mappings',key='find_mappings',disabled=not pending,help='Discover candidates only. Review suggestions and apply selected mappings before collecting evidence. No package code is downloaded or run.')
+        retry_mappings=retry_col.button('Retry failed mapping lookups',key='retry_mappings',disabled=not retry_pending)
+        if find_mappings or retry_mappings:
+            targets=list((retry_pending if retry_mappings else pending).values())[:MAX_LOOKUPS]
+            progress=st.progress(0,text='Finding repository mappings')
+            lookup_batch(targets,mapping_cache,retry=retry_mappings,progress=lambda i,n:progress.progress(i/n,text=f'Package metadata: {i} of {n}'))
+            progress.empty()
+            st.rerun()
+        lookup_rows=[]
+        for item in components:
+            ref=package_ref(item.get('purl'))
+            record=mapping_cache.get(ref['key'],{}) if ref else {}
+            if record:
+                lookup_rows.append({'Component':item['name'],'ID':item['id'],'Status':'applied' if item['id'] in mapping_provenance else record['status'],'Suggested repositories':', '.join(c['repository'] for c in record['candidates']),'Metadata source':record['source_url'],'Details':record['message']})
+        if lookup_rows: st.dataframe(lookup_rows,hide_index=True,width='stretch',column_config={'Metadata source':st.column_config.LinkColumn('Metadata source')})
+        options=candidate_options(components,mapping_cache)
+        selected_mappings=st.multiselect('Reviewed repository suggestions',list(options),key='mapping_suggestions_'+context,help='Review the metadata source and verify each upstream project. Select one repository per component, then apply. Ambiguous candidates need an explicit choice. Nothing is selected automatically.')
+        if st.button('Apply selected mappings',key='apply_mappings',disabled=not selected_mappings):
+            try:
+                count=apply_candidates(selected_mappings,options,st.session_state.repository_overrides,evidence,mapping_provenance)
+                st.session_state.mapping_input_updates={ref:repo for ref,repo,_ in (options[value] for value in selected_mappings)}
+                st.session_state.pop('assessment_scope_'+context,None)
+                st.session_state.pop('research_repos_'+context,None)
+                st.session_state.pop('mapping_suggestions_'+context,None)
+                st.session_state.mapping_applied=count
+                st.rerun()
+            except ValueError as exc: st.error(str(exc))
+    if st.session_state.get('mapping_applied'):
+        st.success(f"Applied {st.session_state.pop('mapping_applied')} mapping(s). Select their repositories under Assessment evidence, then collect observations.")
     mapping_id=st.selectbox('Component repository mapping',[c['id'] for c in components],format_func=lambda ref:next(c['name']+' ['+ref+']' for c in components if c['id']==ref),key='mapping_component_'+context)
     mapping_component=next(c for c in components if c['id']==mapping_id)
-    mapping_value=st.text_input('GitHub repository (owner/repository or URL)',value=mapping_component['repo'] or '',key='mapping_value_'+context+mapping_id,help='Use the verified upstream GitHub repository. Leave blank to remove a mapping. This does not change the original SBOM. Saving a changed mapping clears only that component\'s old observations.')
+    mapping_input_key='mapping_value_'+context+mapping_id
+    if mapping_input_key not in st.session_state: st.session_state[mapping_input_key]=mapping_component['repo'] or ''
+    mapping_value=st.text_input('GitHub repository (owner/repository or URL)',key=mapping_input_key,help='Use the verified upstream GitHub repository. Leave blank to remove a mapping. This does not change the original SBOM. Saving a changed mapping clears only that component\'s old observations.')
     if st.button('Save repository mapping',key='save_mapping'):
         try:
             new_repo=repository_input(mapping_value)
             if new_repo!=mapping_component['repo']:
                 st.session_state.setdefault('repository_overrides',{})[mapping_id]=new_repo
+                mapping_provenance.pop(mapping_id,None)
                 evidence[mapping_id]=unknown_evidence()
                 st.session_state.pop('assessment_scope_'+context,None)
+                st.session_state.pop('research_repos_'+context,None)
             st.rerun()
         except ValueError as exc: st.error(str(exc))
     st.download_button('Download imported SBOM' if upload else 'Download sample SBOM',raw,file_name='inventory.json',mime='application/json')
 repos=list(dict.fromkeys(c['repo'] for c in components if c['repo']))
 if upload:
     if unmapped:
-        st.warning(f'{unmapped:,} component(s) need repository mappings before GitHub evidence can be collected. Add them under Inventory & repository mapping.')
+        st.warning(f'{unmapped:,} component(s) need repository mappings for GitHub collection. Use Find repository mappings under Inventory & repository mapping, review and apply suggestions, or enter a verified GitHub URL manually. Components with mappings can already be assessed.')
     st.info('Upload imports the component list. Collect assessment evidence below to calculate exposure. Mission impact uses your three mission inputs; their initial values give 60.')
 
 st.subheader('Assessment evidence',help='Collect the GitHub observations used by exposure and completeness. This is separate from optional Tavily contributor-source research. It never spends Tavily credits.')
@@ -223,8 +286,14 @@ if 'assessment_scope_'+context not in st.session_state:
 assessment_scope=st.multiselect('Repositories for assessment',repos,max_selections=25,key='assessment_scope_'+context,help='Collect up to 25 repositories per run. Every component sharing a repository receives the same observations. Choose another group for larger inventories. Collected observations stay cached in this session.')
 st.caption('Collection uses GitHub only; a Tavily key is not needed. Up to 25 repositories per run. Missing observations stay unknown and are listed in Evidence.')
 action_left,action_right=st.columns(2)
-action_left.button('Collect assessment evidence',key='collect_assessment',type='primary',disabled=not assessment_scope,on_click=request_assessment_collection,args=(assessment_scope,),help='Switch to Live GitHub and collect repository metadata, available branch settings, and contributors for the selected repositories. Previously collected observations are reused.')
+action_left.button('Collect assessment evidence',key='collect_assessment',type='primary',disabled=not assessment_scope,on_click=request_assessment_collection,args=(assessment_scope,),help='Collect repository metadata, available branch settings, and contributors using your GitHub connection. Previously collected observations are reused. No Tavily searches run.')
 action_right.button('Retry missing evidence',key='retry_assessment',disabled=not assessment_scope,on_click=request_assessment_retry,args=(assessment_scope,),help='Retry selected repositories with failed or partial collection, for example after replacing an expired token. Repositories without failures use cached observations.')
+if not repos:
+    st.info('Collection is unavailable because this inventory has no GitHub repository mappings. Use Find repository mappings, then review and apply suggestions; or enter and save a verified GitHub URL manually. Mission inputs, local control drafting, and reports can still be used without a mapping.')
+elif not assessment_scope:
+    st.info('Select at least one repository in Repositories for assessment to enable collection. Your evidence-mode setting does not block this action.')
+else:
+    st.caption(f'Ready to collect {len(assessment_scope)} repository mapping(s) using Live GitHub. Current evidence mode: {mode}.')
 collection_requested=st.session_state.pop('collect_assessment_requested',False)
 collection_retry=st.session_state.pop('retry_assessment_requested',False)
 if collection_requested:
@@ -240,15 +309,25 @@ if collection_requested:
         st.error('No scored observations returned. Review Evidence for HTTP errors, check repository mappings and your token, then use Retry missing evidence.')
 st.subheader('Research',help='Review the mappings before selecting repositories. GitHub supplies governance observations; Tavily finds public contributor sources. Research never starts on upload or rerender.')
 coach('research')
-selected_repos=st.multiselect('Repositories to research',repos,default=repos[:5],max_selections=5,key='research_repos_'+context,help='Select up to five verified GitHub mappings. Components sharing one repository share a single research result.')
+research_requested=st.session_state.get('research_requested')
+if research_requested:
+    st.session_state['research_repos_'+context]=[repo for repo in research_requested['repositories'] if repo in repos]
+if 'research_repos_'+context not in st.session_state:
+    st.session_state['research_repos_'+context]=repos[:5]
+selected_repos=st.multiselect('Repositories to research',repos,max_selections=5,key='research_repos_'+context,help='Select up to five verified GitHub mappings. Components sharing one repository share a single research result.')
 top_n=st.number_input('Contributors per repository',min_value=1,max_value=3,value=3,step=1,help='Top named non-bot contributors from the returned GitHub sample. Two web searches per contributor; this is a bounded sample, not a complete maintainer audit.')
 st.caption(f'Up to {len(selected_repos)*top_n*2} Tavily searches per run (maximum 30). Deep extraction is disabled. Cached scopes are reused.')
 if not tavily_key: st.caption('No Tavily key: GitHub observations can still be collected; contributor web research is skipped.')
-run=st.button('Run research',disabled=mode!='Live GitHub' or not selected_repos,key='run_research')
+st.button('Run research',disabled=not selected_repos,key='run_research',on_click=request_research,args=(selected_repos,),help='Collect GitHub observations and, if a Tavily key is supplied, run contributor-source searches for this scope. Clicking explicitly chooses live collection; no separate mode switch is required.')
 failed=[r for r in selected_repos if st.session_state.research_cache.get(f'{r}:{top_n}',{}).get('status') in ('partial','failed')]
-retry=st.button('Retry failed research',disabled=not failed or not tavily_key or mode!='Live GitHub',key='retry_research')
-if run or retry:
-    targets=failed if retry else selected_repos
+st.button('Retry failed research',disabled=not failed or not tavily_key,key='retry_research',on_click=request_research,args=(failed,True))
+if not repos: st.caption('Research needs a verified GitHub repository mapping; accepted API credentials alone do not identify a component\'s upstream repository.')
+elif not selected_repos: st.caption('Select one or more Repositories to research to enable Run research.')
+if not failed: st.caption('Retry failed research is available after a partial or failed Tavily research run.')
+research_requested=st.session_state.pop('research_requested',None)
+if research_requested:
+    retry=research_requested['retry']
+    targets=[repo for repo in research_requested['repositories'] if repo in repos]
     progress=st.progress(0,text='Collecting repository evidence')
     collect_inventory(components,evidence,targets,token,use_scorecard,
         progress=lambda i,n,r:progress.progress(i/n,text=f'GitHub: {r}'))
@@ -267,9 +346,9 @@ if 'pending_component' in st.session_state:
     st.session_state.component_choice=st.session_state.pop('pending_component')
 selected=st.selectbox('Inspect component',list(labels),format_func=labels.get,key='component_choice', help='Select a component here or click its point on the matrix. Inputs and proposed controls are saved per component for this session.')
 c=next(c for c in components if c['id']==selected)
-if mode=='Live GitHub':
+if mode=='Live GitHub' or upload:
     col1,col2=st.columns([1,3])
-    with col1: fetch=st.button('Fetch evidence',disabled=not c['repo'], help='Refresh repository metadata, branch settings, and up to 100 contributor records. All components mapped to this repository receive the same evidence.')
+    with col1: fetch=st.button('Fetch evidence',disabled=not c['repo'],on_click=enable_live_mode, help='Refresh repository metadata, branch settings, and up to 100 contributor records. All components mapped to this repository receive the same evidence. No separate evidence-mode switch is required.')
     if fetch:
         with st.spinner('Collecting public repository evidence…'):
             observation=collect(c['repo'],token,use_scorecard)
